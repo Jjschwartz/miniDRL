@@ -46,8 +46,7 @@ NETWORKS = {
 }
 
 NUM_WORKERS = [1, 2]
-# NUM_ENVS_PER_WORKER = [1, 2, 3, 4, 8]
-NUM_ENVS_PER_WORKER = [256]
+NUM_ENVS_PER_WORKER = [1, 2, 3, 4, 8, 16, 32, 64, 128, 256]
 NUM_STEPS = [32, 64, 128, 256]
 
 # parameters to play with
@@ -73,7 +72,7 @@ def run_benchmarking_ppo(config: PPOConfig):
 
     # env setup
     # created here for generating model
-    env = get_env_creator_fn(config, env_idx=0, worker_idx=None)()
+    env = config.env_creator_fn_getter(config, env_idx=0, worker_idx=None)()
     obs_space = env.observation_space
     act_space = env.action_space
 
@@ -310,20 +309,6 @@ def run_benchmarking_ppo(config: PPOConfig):
     for i in range(config.num_workers):
         input_queues[i].close()
         output_queues[i].close()
-
-    # explicitly clean-up shared memory
-    # del model
-    # del optimizer
-    # del env
-    # del obs
-    # del actions
-    # del logprobs
-    # del rewards
-    # del dones
-    # del values
-    # del initial_lstm_state
-    # del ep_returns
-    # del ep_lens
 
     return {
         "total_steps": global_step,

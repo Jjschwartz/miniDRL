@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from dataclasses import dataclass, field
 from distutils.util import strtobool
@@ -9,15 +10,24 @@ from distutils.util import strtobool
 import gymnasium as gym
 import torch
 
+from porl.config import BASE_RESULTS_DIR
+from porl.ppo.network import PPONetwork
 
-def get_env_creator_fn(config: PPOConfig, env_idx: int, worker_idx: int | None = None):
+
+def get_env_creator_fn(
+    config: PPOConfig,
+    env_idx: int,
+    worker_idx: int | None = None,
+):
     """Get environment creator function."""
 
     def thunk():
-        env = gym.make(config.env_id)
+        capture_video = config.capture_video and worker_idx == 0 and env_idx == 0
+        render_mode = "rgb_array" if capture_video else None
+        env = gym.make(config.env_id, render_mode=render_mode)
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        if config.capture_video and worker_idx == 0 and env_idx == 0:
-            env = gym.wrappers.RecordVideo(env, f"videos/{config.run_name}")
+        if capture_video:
+            env = gym.wrappers.RecordVideo(env, config.video_dir)
         seed = config.seed + env_idx
         if worker_idx is not None:
             seed += worker_idx * PPOConfig.num_envs_per_worker
@@ -27,6 +37,23 @@ def get_env_creator_fn(config: PPOConfig, env_idx: int, worker_idx: int | None =
         return env
 
     return thunk
+
+
+def default_model_loader(config: PPOConfig):
+    """Get model creator function."""
+
+    env = config.env_creator_fn_getter(config, env_idx=0, worker_idx=None)()
+    obs_space = env.observation_space
+    act_space = env.action_space
+    model = PPONetwork(
+        obs_space,
+        act_space,
+        trunk_sizes=config.trunk_sizes,
+        lstm_size=config.lstm_size,
+        head_sizes=config.head_sizes,
+    )
+    env.close()
+    return model
 
 
 @dataclass
@@ -40,6 +67,10 @@ class PPOConfig:
     # The name of this run
     # run_name = f"{exp_name}_{env_id}_{seed}_{time}"
     run_name: str = field(init=False)
+    # Directory where the model and logs will be saved
+    log_dir: str = field(init=False)
+    # Directory where videos will be saved
+    video_dir: str = field(init=False)
     # Experiment seed
     seed: int = 0
     # Whether to set torch to deterministic mode
@@ -61,6 +92,9 @@ class PPOConfig:
     env_id: str = "CartPole-v1"
     # whether to capture videos of the agent performances (check out `videos` folder)
     capture_video: bool = False
+    # function for getting the environment creator function
+    # Callable[[PPOConfig, int, int | None], Callable[[], gym.Env]
+    env_creator_fn_getter: callable = get_env_creator_fn
 
     # Training configuration
     # ----------------------
@@ -111,10 +145,13 @@ class PPOConfig:
     # the target KL divergence threshold
     target_kl: float | None = None
     # number of steps after which the model is saved
-    save_interval: int = 100
+    save_interval: int = 0
 
     # Model configuration
     # -------------------
+    # function for loading model
+    # Callable[[PPOConfig], nn.Module]
+    model_loader: callable = default_model_loader
     # size of each layer of the MLP trunk
     trunk_sizes: list[int] = field(default_factory=lambda: [64])
     # size of the LSTM layer
@@ -122,9 +159,18 @@ class PPOConfig:
     # size of each layer of the policy and value heads
     head_sizes: list[int] = field(default_factory=lambda: [64])
 
+    # Evaluation configuration
+    # ------------------------
+    # number of updates between evaluations
+    eval_interval: int = 0
+    # number of steps per evaluation (per eval environment)
+    eval_num_steps: int = 1500
+
     def __post_init__(self):
         """Post initialization."""
         self.run_name = f"{self.exp_name}_{self.env_id}_{self.seed}_{int(time.time())}"
+        self.log_dir = os.path.join(BASE_RESULTS_DIR, self.run_name)
+        self.video_dir = os.path.join(self.log_dir, "videos")
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() and self.cuda else "cpu"
         )
@@ -137,6 +183,10 @@ class PPOConfig:
             "The number of parallel environments (num_envs_per_worker * num_workers) "
             "must be a multiple of the number of minibatches."
         )
+
+    def load_model(self):
+        """Load the model."""
+        return self.model_loader(self)
 
 
 def parse_ppo_args() -> PPOConfig:
@@ -202,6 +252,8 @@ def parse_ppo_args() -> PPOConfig:
         help="the maximum norm for the gradient clipping")
     parser.add_argument("--target-kl", type=float, default=None,
         help="the target KL divergence threshold")
+    parser.add_argument("--save-interval", type=int, default=0,
+        help="checkpoint saving interval, w.r.t. updates. If save-interval <= 0, no saving.")
     
     # Model specific arguments
     parser.add_argument("--trunk-sizes", nargs="+", type=int, default=[64],
@@ -210,6 +262,13 @@ def parse_ppo_args() -> PPOConfig:
         help="size of LSTM layer")
     parser.add_argument("--head-sizes", nargs="+", type=int, default=[64],
         help="size of each layer of the MLP policy and value heads")
+
+    # Evaluation specific arguments
+    parser.add_argument("--eval-interval", type=int, default=100,
+        help="evaluation interval w.r.t updates. If eval-interval <= 0, no evaluation.")
+    parser.add_argument("--eval-num-steps", type=int, default=1500,
+        help="minimum number of steps per evaluation (per eval environment = num-envs-per-worker)")
+
     args = parser.parse_args()
     # fmt: on
     return PPOConfig(**vars(args))

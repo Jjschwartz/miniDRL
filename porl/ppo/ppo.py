@@ -1,6 +1,8 @@
 """PPO with multiple rollout workers collecting trajectories in parallel."""
+import os
 import random
 import time
+from dataclasses import asdict
 from typing import Tuple
 
 import gymnasium as gym
@@ -12,7 +14,7 @@ import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
 from porl.ppo.network import PPONetwork
-from porl.ppo.utils import PPOConfig, get_env_creator_fn, parse_ppo_args
+from porl.ppo.utils import PPOConfig
 
 
 def run_rollout_worker(
@@ -33,19 +35,13 @@ def run_rollout_worker(
     # Note: SyncVectorEnv runs multiple-env instances serially.
     envs = gym.vector.SyncVectorEnv(
         [
-            get_env_creator_fn(config, env_idx=i, worker_idx=worker_id)
+            config.env_creator_fn_getter(config, env_idx=i, worker_idx=worker_id)
             for i in range(config.num_envs_per_worker)
         ]
     )
 
     # model setup
-    worker_model = PPONetwork(
-        envs.single_observation_space,
-        envs.single_action_space,
-        trunk_sizes=config.trunk_sizes,
-        lstm_size=config.lstm_size,
-        head_sizes=config.head_sizes,
-    )
+    worker_model = config.load_model()
     worker_model.cpu()
 
     # buffers
@@ -158,6 +154,102 @@ def run_rollout_worker(
     envs.close()
 
 
+def run_evaluation_worker(
+    config: PPOConfig,
+    learner_model: PPONetwork,
+    input_queue: mp.Queue,
+    output_queue: mp.Queue,
+):
+    """Worker function for running evaluations.
+
+    The evaluation worker uses the current learner model to run a number of evaluation
+    episodes, then reports the results back to the main process.
+
+    In addition, will record videos of the evaluation episodes if requested.
+
+    """
+    # env setup
+    envs = gym.vector.SyncVectorEnv(
+        [
+            config.env_creator_fn_getter(config, env_idx=i, worker_idx=None)
+            for i in range(config.num_envs_per_worker)
+        ]
+    )
+
+    # model setup
+    worker_model = config.load_model()
+    worker_model.to(config.device)
+    worker_model.eval()
+
+    while True:
+        # wait for main process to signal ready for evaluation
+        if input_queue.get() == 0:
+            # main process has finished training, so end work
+            break
+
+        # sync weights
+        worker_model.load_state_dict(learner_model.state_dict())
+
+        # run evaluation episodes
+        # reseting envs and all variables
+        next_obs = torch.Tensor(envs.reset()[0]).to(config.device)
+        next_done = torch.zeros(config.num_envs_per_worker).to(config.device)
+        next_lstm_state = (
+            torch.zeros(
+                worker_model.lstm.num_layers,
+                config.num_envs_per_worker,
+                worker_model.lstm.hidden_size,
+            ).to(config.device),
+            torch.zeros(
+                worker_model.lstm.num_layers,
+                config.num_envs_per_worker,
+                worker_model.lstm.hidden_size,
+            ).to(config.device),
+        )
+        start_time = time.time()
+        num_episodes = 0
+        episode_returns_total = 0.0
+        episode_lengths_total = 0.0
+
+        steps = 0
+        while num_episodes == 0 or steps < config.eval_num_steps:
+            # sample next action
+            with torch.no_grad():
+                action, _, _, _, next_lstm_state = worker_model.get_action_and_value(
+                    next_obs, next_lstm_state, next_done
+                )
+
+            # execute step and log data.
+            next_obs, reward, terminated, truncated, info = envs.step(
+                action.cpu().numpy()
+            )
+
+            done = terminated | truncated
+            next_obs = torch.Tensor(next_obs).to(config.device)
+            next_done = torch.Tensor(done).to(config.device)
+            steps += 1
+
+            for item in [
+                i
+                for i in info.get("final_info", [])
+                if i is not None and "episode" in i
+            ]:
+                num_episodes += 1
+                episode_returns_total += item["episode"]["r"][0]
+                episode_lengths_total += item["episode"]["l"][0]
+
+        envs.close()
+        output_queue.put(
+            {
+                "steps": steps,
+                "num_episodes": num_episodes,
+                "episodic_return": episode_returns_total / num_episodes,
+                "episodic_length": episode_lengths_total / num_episodes,
+                "time": time.time() - start_time,
+            }
+        )
+
+
 def run_ppo(config: PPOConfig):
     # seeding
     random.seed(config.seed)
@@ -167,19 +259,19 @@ def run_ppo(config: PPOConfig):
 
     # env setup
     # created here for generating model
-    env = get_env_creator_fn(config, env_idx=0, worker_idx=None)()
+    env = config.env_creator_fn_getter(config, env_idx=0, worker_idx=None)()
     obs_space = env.observation_space
     act_space = env.action_space
 
+    print("Running PPO:")
+    print(f"Env-id: {config.env_id}")
+    print(f"Observation space: {obs_space}")
+    print(f"Action space: {act_space}")
+
     # model setup
     device = config.device
-    model = PPONetwork(
-        obs_space,
-        act_space,
-        trunk_sizes=config.trunk_sizes,
-        lstm_size=config.lstm_size,
-        head_sizes=config.head_sizes,
-    ).to(device)
+    model = config.load_model()
+    model.to(device)
 
     # Experience buffer setup
     total_num_envs, num_steps = config.total_num_envs, config.num_steps
@@ -257,6 +349,20 @@ def run_ppo(config: PPOConfig):
         worker.start()
         workers.append(worker)
 
+    # create eval worker
+    eval_input_queue = mp_ctxt.Queue()
+    eval_output_queue = mp_ctxt.Queue()
+    eval_worker = mp_ctxt.Process(
+        target=run_evaluation_worker,
+        args=(
+            config,
+            model,
+            eval_input_queue,
+            eval_output_queue,
+        ),
+    )
+    eval_worker.start()
+
     # Logging setup
     # Do this after workers are spawned to avoid log duplication
     if config.track_wandb:
@@ -271,7 +377,7 @@ def run_ppo(config: PPOConfig):
             monitor_gym=True,
             save_code=True,
         )
-    writer = SummaryWriter(f"runs/{config.run_name}")
+    writer = SummaryWriter(config.log_dir)
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s"
@@ -290,6 +396,20 @@ def run_ppo(config: PPOConfig):
             lrnow = frac * config.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
 
+        # run evaluation
+        if config.eval_interval > 0 and update % config.eval_interval == 1:
+            print("Running evaluation...")
+            eval_input_queue.put(1)
+            eval_results = eval_output_queue.get()
+
+            print(
+                f"global_step={global_step}, "
+                f"evaluation/episodic_return={eval_results['episodic_return']:.2f}, "
+                f"evaluation/episodic_length={eval_results['episodic_length']:.2f}"
+            )
+            for key, value in eval_results.items():
+                writer.add_scalar(f"evaluation/{key}", value, global_step)
+
         experience_collection_start_time = time.time()
         # signal workers to collect next batch of experience
         for i in range(config.num_workers):
@@ -305,13 +425,17 @@ def run_ppo(config: PPOConfig):
         global_step += config.batch_size
         mean_episode_return = torch.mean(ep_returns).item()
         mean_episode_len = torch.mean(ep_lens).item()
-        print(
-            f"global_step={global_step}, "
-            f"episodic_return={mean_episode_return:.2f}, "
-            f"episodic_length={mean_episode_len:.2f}, "
-        )
-        writer.add_scalar("charts/episodic_return", mean_episode_return, global_step)
-        writer.add_scalar("charts/episodic_length", mean_episode_len, global_step)
+        if mean_episode_len > 0:
+            # only log if there were episodes completed
+            print(
+                f"global_step={global_step}, "
+                f"episodic_return={mean_episode_return:.2f}, "
+                f"episodic_length={mean_episode_len:.2f}"
+            )
+            writer.add_scalar(
+                "charts/episodic_return", mean_episode_return, global_step
+            )
+            writer.add_scalar("charts/episodic_length", mean_episode_len, global_step)
 
         learning_start_time = time.time()
         # calculate advantages and monte-carlo returns
@@ -442,6 +566,19 @@ def run_ppo(config: PPOConfig):
         )
         writer.add_scalar("charts/learing_time", learning_time, global_step)
 
+        if config.save_interval > 0 and update % config.save_interval == 0:
+            print("Saving model")
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "global_step": global_step,
+                    "update": update,
+                    "config": asdict(config),
+                },
+                os.path.join(config.log_dir, f"checkpoint_{update}.pt"),
+            )
+
     env.close()
     writer.close()
 
@@ -449,18 +586,18 @@ def run_ppo(config: PPOConfig):
     print("Sending stop signal to workers.")
     for i in range(config.num_workers):
         input_queues[i].put(0)
+    eval_input_queue.put(0)
 
     print("Stop signal sent, joining workers.")
     for i in range(config.num_workers):
         workers[i].join()
+    eval_worker.join()
 
     print("Workers successfully joined. Cleaning up communication queues.")
     for i in range(config.num_workers):
         input_queues[i].close()
         output_queues[i].close()
+    eval_input_queue.close()
+    eval_output_queue.close()
 
     print("All done")
-
-
-if __name__ == "__main__":
-    run_ppo(parse_ppo_args())

@@ -8,7 +8,6 @@ import torch
 from torch import nn
 from torch.distributions.categorical import Categorical
 
-
 if TYPE_CHECKING:
     import gymnasium as gym
 
@@ -75,17 +74,23 @@ class PPONetwork(nn.Module):
     def get_states(self, x, lstm_state, done):
         """Get the next states from the LSTM.
 
+        `batch_size` is typically the number of parallel environments contained in
+        the current batch.
+
         Arguments
         ---------
-        x: The input to the network. Shape (batch_size, input_size).
-        lstm_state: The previous state of the LSTM. Shape
-            (seq_len, batch_size, features).
-        done: Whether the episode is done. Shape (batch_size,).
+        x: The input to the network. Shape (seq_len * batch_size, input_size).
+        lstm_state: The previous state of the LSTM. This is a tuple with two entrie,
+            each of which has shape=(lstm.num_layers, batch_size, lstm_size).
+        done: Whether the episode is done, has shape=(seq_len * batch_size,).
 
         Returns
         -------
-        new_hidden: The output of the LSTM. Shape (seq_len, batch_size, features)
-        lstm_state: The new state of the LSTM. Shape (seq_len, batch_size, features).
+        new_hidden: The output of the LSTM layer for each input x, has
+            shape=(seq_len * batch_size, lstm_size)
+        lstm_state: The new state of the LSTM at the end of the sequence. This is a
+            tuple with two entries, each of which has
+            shape=(lstm.num_layers, batch_size, lstm_size).
         """
         hidden = self.trunk(x)
 
