@@ -10,8 +10,8 @@ from distutils.util import strtobool
 import gymnasium as gym
 import torch
 
-from porl.config import BASE_RESULTS_DIR
-from porl.r2d2.network import R2D2Network
+from d2rl.config import BASE_RESULTS_DIR
+from d2rl.r2d2.network import R2D2Network
 
 
 def get_env_creator_fn(config: R2D2Config, env_idx: int, actor_idx: int | None = None):

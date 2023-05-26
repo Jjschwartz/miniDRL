@@ -1,7 +1,7 @@
 """Run R2D2 on classic gym environments."""
 
-from porl.r2d2.r2d2 import run_r2d2
-from porl.r2d2.utils import parse_r2d2_args
+from d2rl.r2d2.r2d2 import run_r2d2
+from d2rl.r2d2.utils import parse_r2d2_args
 
 
 if __name__ == "__main__":

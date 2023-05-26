@@ -13,9 +13,9 @@ import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.optim as optim
 
-from porl.ppo.network import PPONetwork
-from porl.ppo.ppo import run_rollout_worker
-from porl.ppo.utils import PPOConfig, get_env_creator_fn
+from d2rl.ppo.network import PPONetwork
+from d2rl.ppo.ppo import run_rollout_worker
+from d2rl.ppo.utils import PPOConfig, get_env_creator_fn
 
 DEFAULT_CONFIG = {
     "exp_name": "ppo_benchmarking",

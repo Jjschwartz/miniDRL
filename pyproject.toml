@@ -1,7 +1,7 @@
 [tool.poetry]
-name = "porl"
+name = "d2rl"
 version = "0.1.0"
-description = "Implementations of deep reinforcement learning algorithms for partially observable environments."
+description = "Simple implementations of distributed, recurrent neural network (RNN) based deep reinforcement learning algorithms."
 authors = ["Jonathon Schwartz <Jonathon.schwartz@anu.edu.au>"]
 license = "MIT"
 readme = "README.md"

@@ -4,8 +4,8 @@ from __future__ import annotations
 import gymnasium as gym
 import numpy as np
 
-from porl.ppo.ppo import run_ppo
-from porl.ppo.utils import PPOConfig, parse_ppo_args
+from d2rl.ppo.ppo import run_ppo
+from d2rl.ppo.utils import PPOConfig, parse_ppo_args
 
 
 def get_minigrid_env_creator_fn(

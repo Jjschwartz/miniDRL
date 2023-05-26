@@ -10,8 +10,8 @@ from distutils.util import strtobool
 import gymnasium as gym
 import torch
 
-from porl.config import BASE_RESULTS_DIR
-from porl.ppo.network import PPONetwork
+from d2rl.config import BASE_RESULTS_DIR
+from d2rl.ppo.network import PPONetwork
 
 
 def get_env_creator_fn(

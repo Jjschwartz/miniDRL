@@ -11,15 +11,15 @@ import torch
 import torch.nn as nn
 from torch.distributions.categorical import Categorical
 
-from porl.common.atari_wrappers import (
+from d2rl.common.atari_wrappers import (
     ClipRewardEnv,
     EpisodicLifeEnv,
     FireResetEnv,
     MaxAndSkipEnv,
     NoopResetEnv,
 )
-from porl.ppo.ppo import run_ppo
-from porl.ppo.utils import PPOConfig
+from d2rl.ppo.ppo import run_ppo
+from d2rl.ppo.utils import PPOConfig
 
 
 def quadratic_episode_trigger(x: int) -> bool:
