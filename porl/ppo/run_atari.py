@@ -178,7 +178,7 @@ def parse_ppo_atari_args() -> PPOConfig:
         help="whether to capture videos of the agent performances (check out `videos` folder)")
 
     # Algorithm specific arguments
-    parser.add_argument("--total-timesteps", type=int, default=10000000,
+    parser.add_argument("--total-timesteps", type=int, default=1000000,
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
@@ -223,11 +223,11 @@ def parse_ppo_atari_args() -> PPOConfig:
     
     args = parser.parse_args()
     # fmt: on
-    return PPOConfig(**vars(args))
+    config = PPOConfig(**vars(args))
+    config.env_creator_fn_getter = get_atari_env_creator_fn
+    config.model_loader = atari_model_loader
+    return config
 
 
 if __name__ == "__main__":
-    ppo_config = parse_ppo_atari_args()
-    ppo_config.env_creator_fn_getter = get_atari_env_creator_fn
-    ppo_config.model_loader = atari_model_loader
-    run_ppo(ppo_config)
+    run_ppo(parse_ppo_atari_args())
