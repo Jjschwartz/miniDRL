@@ -10,9 +10,9 @@ readme = "README.md"
 python = ">=3.9, <3.11"
 wandb = "^0.15"
 # needed so torch install properly with poetry
-torch = [
-  {url = "https://download.pytorch.org/whl/cu117/torch-2.0.1%2Bcu117-cp39-cp39-linux_x86_64.whl", markers = "sys_platform == 'linux'"}
-]
+# torch = [
+#   {url = "https://download.pytorch.org/whl/cu117/torch-2.0.1%2Bcu117-cp39-cp39-linux_x86_64.whl", markers = "sys_platform == 'linux'"}
+# ]
 numpy = ">=1.24"
 gymnasium = {extras = ["atari", "box2d", "classic_control", "toy_text", "accept-rom-license", "other"], version = ">=0.28.1"}
 tensorboard = "^2.13.0"

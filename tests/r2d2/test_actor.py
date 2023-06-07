@@ -4,9 +4,9 @@ import time
 import gymnasium as gym
 import torch.multiprocessing as mp
 
-from porl.r2d2.r2d2 import run_actor
-from porl.r2d2.replay import R2D2PrioritizedReplay
-from porl.r2d2.utils import R2D2Config
+from d2rl.r2d2.r2d2 import run_actor
+from d2rl.r2d2.replay import R2D2PrioritizedReplay
+from d2rl.r2d2.utils import R2D2Config
 
 
 def test_run_actor():

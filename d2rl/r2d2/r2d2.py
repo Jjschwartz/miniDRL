@@ -433,7 +433,7 @@ def run_r2d2(config: R2D2Config):
 
     # Logging setup
     # Do this after workers are spawned to avoid log duplication
-    if not config.debug_no_logging and config.track_wandb:
+    if not config.debug_disable_tensorboard and config.track_wandb:
         import wandb
 
         wandb.init(
@@ -445,7 +445,7 @@ def run_r2d2(config: R2D2Config):
             monitor_gym=True,
             save_code=True,
         )
-    if not config.debug_no_logging:
+    if not config.debug_disable_tensorboard:
         writer = SummaryWriter(config.log_dir)
         writer.add_text(
             "hyperparameters",

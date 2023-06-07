@@ -1,6 +1,6 @@
 """Tests for R2D2 main function."""
-from porl.r2d2.r2d2 import run_r2d2
-from porl.r2d2.utils import R2D2Config
+from d2rl.r2d2.r2d2 import run_r2d2
+from d2rl.r2d2.utils import R2D2Config
 
 
 def test_run_r2d2():

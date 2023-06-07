@@ -146,16 +146,16 @@ class R2D2PrioritizedReplay:
         # capacity = number of sequences
         self.capacity = config.replay_buffer_size
         self.actor_capacity = self.capacity // config.num_actors
-        self.total_seq_len = config.seq_len + config.burnin_len
+        self.total_seq_len = config.seq_len + config.burnin_len + 1
 
         C, T = self.capacity, self.total_seq_len
         self.obs_storage = torch.zeros(
-            (T + 1, C, *obs_space.shape),
+            (T, C, *obs_space.shape),
             dtype=torch.from_numpy(obs_space.sample()).dtype,
         )
-        self.action_storage = torch.zeros((T + 1, C), dtype=torch.long)
-        self.reward_storage = torch.zeros((T + 1, C), dtype=torch.float32)
-        self.done_storage = torch.zeros((T + 1, C), dtype=torch.long)
+        self.action_storage = torch.zeros((T, C), dtype=torch.int8)
+        self.reward_storage = torch.zeros((T, C), dtype=torch.float32)
+        self.done_storage = torch.zeros((T, C), dtype=torch.bool)
         self.lstm_h_storage = torch.zeros((1, C, config.lstm_size), dtype=torch.float32)
         self.lstm_c_storage = torch.zeros((1, C, config.lstm_size), dtype=torch.float32)
         self.num_added = torch.zeros((config.num_actors,), dtype=torch.long)
@@ -352,7 +352,7 @@ class R2D2ActorReplayBuffer:
         self.actor_idx = actor_idx
         self.config = config
         self.capacity = config.replay_buffer_size // config.num_actors
-        self.total_seq_len = config.seq_len + config.burnin_len
+        self.total_seq_len = config.seq_len + config.burnin_len + 1
 
         self.obs_storage = obs_storage
         self.action_storage = action_storage
@@ -392,7 +392,7 @@ class R2D2ActorReplayBuffer:
         priority : The priority of the transition. Shape=(B,)
 
         """
-        assert len(obs) == self.total_seq_len + 1
+        assert len(obs) == self.total_seq_len
 
         batch_size = obs.shape[1]
         index = self.num_added[self.actor_idx] % self.capacity

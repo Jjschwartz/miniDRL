@@ -15,7 +15,7 @@ import torch.optim as optim
 
 from d2rl.ppo.network import PPONetwork
 from d2rl.ppo.ppo import run_rollout_worker
-from d2rl.ppo.utils import PPOConfig, get_env_creator_fn
+from d2rl.ppo.utils import PPOConfig
 
 DEFAULT_CONFIG = {
     "exp_name": "ppo_benchmarking",

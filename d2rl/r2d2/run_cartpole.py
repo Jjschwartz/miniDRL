@@ -1,9 +1,9 @@
 """Tests for R2D2 main function."""
-from porl.r2d2.r2d2 import run_r2d2
-from porl.r2d2.utils import R2D2Config
+from d2rl.r2d2.r2d2 import run_r2d2
+from d2rl.r2d2.utils import R2D2Config
 
 
-def test_run_r2d2():
+def run_r2d2_cartpole():
     """Tests running R2D2."""
     env_id = "CartPole-v1"
     config = R2D2Config(
@@ -11,7 +11,7 @@ def test_run_r2d2():
         # tracking
         track_wandb=True,
         # training config
-        total_timesteps=100000,
+        total_timesteps=10000,
         num_actors=1,
         num_envs_per_actor=8,
         actor_device="cuda",
@@ -41,4 +41,4 @@ def test_run_r2d2():
 
 
 if __name__ == "__main__":
-    test_run_r2d2()
+    run_r2d2_cartpole()

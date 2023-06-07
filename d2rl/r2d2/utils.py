@@ -170,7 +170,7 @@ class R2D2Config:
     # number of steps to run actor for, can be set so run_actor can be tested
     debug_actor_steps: int | None = None
     # disable logging
-    debug_no_logging: bool = False
+    debug_disable_tensorboard: bool = False
 
     def __post_init__(self):
         """Post initialization."""
@@ -189,8 +189,7 @@ class R2D2Config:
         assert (
             self.seq_len == 1 or self.seq_len % 2 == 0
         ), "Sequence length must be 1 or even."
-        assert self.replay_buffer_size >= self.batch_size
-        assert self.replay_buffer_size >= self.learning_starts
+        assert self.replay_buffer_size >= self.learning_starts >= self.batch_size
 
         self.total_num_envs = self.num_envs_per_actor * self.num_actors
 

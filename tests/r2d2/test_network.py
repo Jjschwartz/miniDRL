@@ -3,7 +3,7 @@
 import gymnasium as gym
 import numpy as np
 import torch
-from porl.r2d2.network import R2D2Network
+from d2rl.r2d2.network import R2D2Network
 
 
 def test_network_init():
