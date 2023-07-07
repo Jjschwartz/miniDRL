@@ -84,7 +84,7 @@ class PPOConfig:
     # WandB conbfiguration
     # --------------------
     track_wandb: bool = False
-    wandb_project: str = "porl"
+    wandb_project: str = "dtrl"
     wandb_entity: str | None = None
 
     # Environment configuration

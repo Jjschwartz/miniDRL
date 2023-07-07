@@ -79,7 +79,7 @@ class R2D2Config:
     # WandB conbfiguration
     # --------------------
     track_wandb: bool = False
-    wandb_project: str = "porl"
+    wandb_project: str = "d2rl"
     wandb_entity: str | None = None
 
     # Environment configuration

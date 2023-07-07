@@ -3,6 +3,7 @@ import os
 import random
 import time
 from dataclasses import asdict
+from datetime import timedelta
 from typing import Tuple
 
 import gymnasium as gym
@@ -31,6 +32,11 @@ def run_rollout_worker(
     shared buffers (which my be on GPU).
 
     """
+    # Limit each rollout worker to using a single CPU thread.
+    # This prevents each rollout worker from using all available cores, which can
+    # cause lead to each rollout worker being slower due to contention.
+    torch.set_num_threads(1)
+
     # env setup
     # Note: SyncVectorEnv runs multiple-env instances serially.
     envs = gym.vector.SyncVectorEnv(
@@ -428,6 +434,7 @@ def run_ppo(config: PPOConfig):
         if mean_episode_len > 0:
             # only log if there were episodes completed
             print(
+                f"{timedelta(seconds=int(time.time()-start_time))} "
                 f"global_step={global_step}, "
                 f"episodic_return={mean_episode_return:.2f}, "
                 f"episodic_length={mean_episode_len:.2f}"
@@ -468,6 +475,7 @@ def run_ppo(config: PPOConfig):
             config.num_steps, total_num_envs
         )
         clipfracs = []
+        approx_kl, old_approx_kl, entropy_loss, pg_loss, v_loss = 0, 0, 0, 0, 0
         for epoch in range(config.update_epochs):
             np.random.shuffle(envinds)
 
@@ -547,8 +555,7 @@ def run_ppo(config: PPOConfig):
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-        # record rewards for plotting purposes
-        sps = int(global_step / (time.time() - start_time))
+        # record learning statistics
         writer.add_scalar(
             "charts/learning_rate", optimizer.param_groups[0]["lr"], global_step
         )
@@ -559,12 +566,15 @@ def run_ppo(config: PPOConfig):
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
+
+        # record timing stats
+        sps = int(global_step / (time.time() - start_time))
         print("SPS:", sps)
         writer.add_scalar("charts/SPS", sps, global_step)
         writer.add_scalar(
             "charts/collection_time", experience_collection_time, global_step
         )
-        writer.add_scalar("charts/learing_time", learning_time, global_step)
+        writer.add_scalar("charts/learning_time", learning_time, global_step)
 
         if config.save_interval > 0 and update % config.save_interval == 0:
             print("Saving model")
