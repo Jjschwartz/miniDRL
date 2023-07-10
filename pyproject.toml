@@ -1,38 +1,70 @@
-[tool.poetry]
-name = "d2rl"
-version = "0.1.0"
-description = "Simple implementations of distributed, recurrent neural network (RNN) based deep reinforcement learning algorithms."
-authors = ["Jonathon Schwartz <Jonathon.schwartz@anu.edu.au>"]
-license = "MIT"
-readme = "README.md"
-
-[tool.poetry.dependencies]
-python = ">=3.9, <3.11"
-wandb = "^0.15"
-# needed so torch install properly with poetry
-torch = [
-  {url = "https://download.pytorch.org/whl/cu117/torch-2.0.1%2Bcu117-cp39-cp39-linux_x86_64.whl", markers = "sys_platform == 'linux'"}
-]
-numpy = ">=1.24"
-gymnasium = {extras = ["atari", "box2d", "classic_control", "toy_text", "accept-rom-license", "other"], version = ">=0.28.1"}
-tensorboard = "^2.13.0"
-
-# A list of all of the optional dependencies, some of which are included in the
-# below `extras`. They can be opted into by apps.
-matplotlib = {version = "^3.7.1", optional = true}
-pandas = {version = "^2.0.1", optional = true}
-seaborn = {version = "^0.12.2", optional = true}
-minigrid = {version = ">=2.0", optional = true}
-
-
-[tool.poetry.extras]
-plot = ["matplotlib", "pandas", "seaborn"]
-minigrid = ["minigrid"]
+# Package ######################################################################
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["setuptools >= 61.0.0"]
+build-backend = "setuptools.build_meta"
 
+[project]
+name = "d2rl"
+description = "Simple implementations of distributed, recurrent neural network (RNN) based deep reinforcement learning algorithms."
+authors = [{ name = "Jonathon Schwartz", email = "jonathon.schwartz@anu.edu.au" }]
+license = { text = "MIT License" }
+readme = "README.md"
+requires-python = ">= 3.9"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    'Intended Audience :: Science/Research',
+    'Topic :: Scientific/Engineering :: Artificial Intelligence',
+]
+dependencies = [
+	"gymnasium >=0.28.1",
+  "numpy >=1.24.0",
+  "typing-extensions >=4.3.0",
+	"importlib-metadata >=4.8.0; python_version < '3.10'",
+  "torch >=2.0.0",
+  "wandb >=0.15",
+  "tensorboard >=2.13.0",
+]
+dynamic = ["version"]
+
+
+[project.optional-dependencies]
+plots = [
+  "matplotlib >=3.7.1",
+  "pandas >=2.0.1",
+  "seaborn >=0.12.2",
+]
+minigrid = ["minigrid >=2.0"]
+atari = [
+  "gymnasium[atari,accept-rom-license] >=0.28.1",
+]
+all = [
+  # Dependencies for all types above
+  "matplotlib >=3.7.1",
+  "pandas >=2.0.1",
+  "seaborn >=0.12.2",
+  "minigrid >=2.0",
+  "gymnasium[all] >=0.28.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/Jjschwartz/distributed-recurrent-rl"
+Repository = "https://github.com/Jjschwartz/distributed-recurrent-rl"
+"Bug Report" = "https://github.com/Jjschwartz/distributed-recurrent-rl/issues"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["d2rl", "d2rl.*"]
+
+[tool.setuptools.package-data]
+d2rl = ["py.typed"]
 
 # Linters and Test tools #######################################################
 
@@ -47,8 +79,8 @@ extend-select = ["C4", "SIM", "TCH"]
 show-fixes = true
 # Same as Black.
 line-length = 88
-# Assume Python 3.9.
-target-version = "py39"
+# Assume Python 3.10.
+target-version = "py310"
 
 
 [tool.ruff.per-file-ignores]
@@ -69,7 +101,7 @@ exclude = ["**/__pycache__"]
 strict = []
 
 typeCheckingMode = "basic"
-pythonVersion = "3.9"
+pythonVersion = "3.10"
 pythonPlatform = "All"
 typeshedPath = "typeshed"
 enableTypeIgnoreComments = true

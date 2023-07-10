@@ -8,13 +8,14 @@ Algorithms are implemented using [PyTorch](https://pytorch.org/).
     
 Pre-requisites:
 
-- python >= 3.8
-- poetry >= 1.1.4
+- python >= 3.9  (tested with 3.10)
 
 ```bash
 git clone git@github.com:Jjschwartz/distributed-recurrent-rl.git
 cd distributed-recurrent-rl
-poetry install
+pip install -e .
+# or to install all dependencies
+pip install -e .[all]
 ```
 
 ## Algorithms
