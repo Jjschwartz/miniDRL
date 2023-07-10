@@ -47,26 +47,22 @@ NETWORKS = {
 
 # number of updates to run per experiment
 NUM_UPDATES = 20
+MAX_BATCH_SIZE = 2**17  # 131072
 
 # full exp
-NUM_WORKERS = [1, 2, 3, 4, 8, 16]
+NUM_WORKERS = [1, 2, 3, 4, 8, 16, 32]
 NUM_ENVS_PER_WORKER = [1, 2, 3, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 NUM_STEPS = [32, 64, 128, 256, 512]
 
 # smaller exp
-NUM_WORKERS = [1, 2]
-NUM_ENVS_PER_WORKER = [1, 2, 3, 4, 8, 16, 32]
-NUM_STEPS = [32, 64, 128]
+# NUM_WORKERS = [1, 2]
+# NUM_ENVS_PER_WORKER = [1, 2, 3, 4, 8, 16, 32]
+# NUM_STEPS = [32, 64, 128]
 
 # parameters to play with
 # - num_workers
 # - num_envs_per_worker
 # - num_steps
-
-# parameters to set
-# - total_timesteps - should be chosen so that num_updates == 100
-#     100 = total_timesteps / (num_steps * num_envs_per_worker * num_workers)
-#     total_timesteps = 100 * (num_steps * num_envs_per_worker * num_workers)
 
 
 def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
@@ -372,6 +368,7 @@ def run(append_results: bool = False, no_learning: bool = False):
         len(NETWORKS) * len(NUM_WORKERS) * len(NUM_ENVS_PER_WORKER) * len(NUM_STEPS)
     )
     print(f"Running a total of {num_exps} experiments")
+
     for net_name, nw, ne, ns in product(
         NETWORKS, NUM_WORKERS, NUM_ENVS_PER_WORKER, NUM_STEPS
     ):
@@ -380,8 +377,13 @@ def run(append_results: bool = False, no_learning: bool = False):
         # except if update size is bigger than 65536, then use update size
         # total_timesteps = max(max(8192, nw * ne * ns), min(65536, 10 * nw * ne * ns))
 
-        # 10 updates (i.e. batches) per experiment
+        # NUM_UPDATES updates (i.e. batches) per experiment
         batch_size = nw * ne * ns
+        if batch_size > MAX_BATCH_SIZE:
+            # skip experiments with too large batch size
+            # since could be too large for CPU/GPU memory and also becomes impractical
+            continue
+
         total_timesteps = NUM_UPDATES * batch_size
 
         print(
