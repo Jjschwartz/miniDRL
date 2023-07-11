@@ -53,16 +53,15 @@ MAX_BATCH_SIZE = 2**17  # 131072
 NUM_WORKERS = [1, 2, 3, 4, 8, 16, 32]
 NUM_ENVS_PER_WORKER = [1, 2, 3, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
 NUM_STEPS = [32, 64, 128, 256, 512]
+# for fixed batch size experiment
+BATCH_SIZES = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+FIXED_BATCH_EXP_SEQ_LEN = 128
 
 # smaller exp
-# NUM_WORKERS = [1, 2]
-# NUM_ENVS_PER_WORKER = [1, 2, 3, 4, 8, 16, 32]
-# NUM_STEPS = [32, 64, 128]
-
-# parameters to play with
-# - num_workers
-# - num_envs_per_worker
-# - num_steps
+# NUM_WORKERS = [1, 2, 3, 4]
+# NUM_ENVS_PER_WORKER = [1, 4]
+# NUM_STEPS = [32, 64]
+# BATCH_SIZES = [1024, 2048, 4096, 8192, 16384, 32768]
 
 
 def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
@@ -349,14 +348,11 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
     }
 
 
-def run(append_results: bool = False, no_learning: bool = False):
-    if no_learning:
-        save_file = os.path.join(
-            os.path.dirname(__file__), "benchmarking_results_no_learning.csv"
-        )
-    else:
-        save_file = os.path.join(os.path.dirname(__file__), "benchmarking_results.csv")
-
+def run(
+    save_file: str,
+    append_results: bool = False,
+    no_learning: bool = False,
+):
     header_written, exp_num = False, 0
     if append_results:
         header_written = True
@@ -368,6 +364,8 @@ def run(append_results: bool = False, no_learning: bool = False):
         len(NETWORKS) * len(NUM_WORKERS) * len(NUM_ENVS_PER_WORKER) * len(NUM_STEPS)
     )
     print(f"Running a total of {num_exps} experiments")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Running on device: {device}")
 
     for net_name, nw, ne, ns in product(
         NETWORKS, NUM_WORKERS, NUM_ENVS_PER_WORKER, NUM_STEPS
@@ -401,12 +399,13 @@ def run(append_results: bool = False, no_learning: bool = False):
             head_sizes=network["head_sizes"],
             **DEFAULT_CONFIG,
         )
+
         result = run_benchmarking_ppo(config, no_learning=no_learning)
         print(
             f"SPS: {result['sps']} | "
-            f"EXP-SPS: {result['experience_sps_std']} +/- "
+            f"EXP-SPS: {result['experience_sps']} +/- "
             f"{result['experience_sps_std']:.2f} | "
-            f"LEARN-SPS: {result['learning_sps_std']} +/- "
+            f"LEARN-SPS: {result['learning_sps']} +/- "
             f"{result['learning_sps_std']:.2f}"
         )
 
@@ -427,16 +426,85 @@ def run(append_results: bool = False, no_learning: bool = False):
             )
         exp_num += 1
 
+    print("Benchmarking experiments finished")
 
-def plot(no_learning: bool = False):
-    if no_learning:
-        save_file = os.path.join(
-            os.path.dirname(__file__), "benchmarking_results_no_learning.csv"
+
+def run_fixed_batch_size(
+    save_file: str,
+    append_results: bool = False,
+    no_learning: bool = False,
+):
+    header_written, exp_num = False, 0
+    if append_results:
+        header_written = True
+        with open(save_file, "r") as f:
+            exp_num = len(f.readlines()) - 1
+
+    print("Running benchmarking fixed batch size experiments")
+    num_exps = len(NETWORKS) * len(BATCH_SIZES)
+    print(f"Running a total of {num_exps} experiments")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Running on device: {device}")
+
+    for net_name, nw, batch_size in product(NETWORKS, NUM_WORKERS, BATCH_SIZES):
+        # Num envs per worker
+        ne = int(batch_size / (nw * FIXED_BATCH_EXP_SEQ_LEN))
+
+        total_timesteps = NUM_UPDATES * batch_size
+
+        print(
+            f"Running exp_num={exp_num}, network={net_name}, batch_size={batch_size}, "
+            f"num_workers={nw}, num_envs_per_worker={ne}, "
+            f"num_steps={FIXED_BATCH_EXP_SEQ_LEN} for {total_timesteps} steps"
         )
-    else:
-        save_file = os.path.join(os.path.dirname(__file__), "benchmarking_results.csv")
+        network = NETWORKS[net_name]
+        config = PPOConfig(
+            total_timesteps=total_timesteps,
+            num_envs_per_worker=ne,
+            num_workers=nw,
+            num_steps=FIXED_BATCH_EXP_SEQ_LEN,
+            trunk_sizes=network["trunk_sizes"],
+            lstm_size=network["lstm_size"],
+            head_sizes=network["head_sizes"],
+            **DEFAULT_CONFIG,
+        )
+
+        result = run_benchmarking_ppo(config, no_learning=no_learning)
+        print(
+            f"SPS: {result['sps']} | "
+            f"EXP-SPS: {result['experience_sps']} +/- "
+            f"{result['experience_sps_std']:.2f} | "
+            f"LEARN-SPS: {result['learning_sps']} +/- "
+            f"{result['learning_sps_std']:.2f}"
+        )
+
+        if not header_written:
+            with open(save_file, "w") as f:
+                f.write(
+                    "exp_num,network,num_workers,num_envs_per_worker,num_steps,"
+                    + ",".join(result.keys())
+                    + "\n"
+                )
+            header_written = True
+
+        with open(save_file, "a") as f:
+            f.write(
+                f"{exp_num},{net_name},{nw},{ne},{FIXED_BATCH_EXP_SEQ_LEN},"
+                + ",".join(map(str, result.values()))
+                + "\n"
+            )
+        exp_num += 1
+
+    print("Benchmarking experiments finished")
+
+
+def plot(save_file: str, no_learning: bool = False):
     df = pd.read_csv(save_file)
     print(str(df.columns))
+
+    df["batch_size"] = df["num_workers"] * df["num_envs_per_worker"] * df["num_steps"]
+    # default num minibatches is 4
+    df["minibatch_size"] = df["batch_size"] // 4
 
     sns.set_theme()
     num_workers = df["num_workers"].unique().tolist()
@@ -446,54 +514,181 @@ def plot(no_learning: bool = False):
     num_envs_per_worker = df["num_envs_per_worker"].unique().tolist()
     num_envs_per_worker.sort()
 
+    for y, yerr in [
+        ("experience_sps", "experience_sps_std"),
+        ("learning_sps", "learning_sps_std"),
+        ("sps", None),
+    ]:
+        fig, axs = plt.subplots(
+            nrows=len(networks),
+            ncols=len(num_workers),
+            squeeze=False,
+            sharex=True,
+            sharey=True,
+        )
+        for row, network in enumerate(networks):
+            for col, num_worker in enumerate(num_workers):
+                ax = axs[row, col]
+                for num_envs in num_envs_per_worker:
+                    df_subset = df[
+                        (df["network"] == network)
+                        & (df["num_workers"] == num_worker)
+                        & (df["num_envs_per_worker"] == num_envs)
+                    ]
+                    if yerr:
+                        ax.errorbar(
+                            x=df_subset["num_steps"],
+                            y=df_subset[y],
+                            yerr=df_subset[yerr],
+                            label=f"{num_envs}",
+                        )
+                    else:
+                        ax.plot(
+                            df_subset["num_steps"],
+                            df_subset[y],
+                            label=f"{num_envs}",
+                        )
+
+                if row == 0:
+                    ax.set_title(f"Num workers={num_worker}")
+                if col == 0:
+                    ax.set_ylabel(f"Network={network}\n\n{y}")
+
+        handles, labels = axs[0, 0].get_legend_handles_labels()
+        fig.legend(
+            handles, labels, loc="center right", ncol=1, title="Num envs\nper worker"
+        )
+        fig.tight_layout(rect=(0, 0, 0.85, 1))
+
+    sns.relplot(
+        data=df,
+        kind="line",
+        x="num_steps",
+        y="sps",
+        hue="batch_size",  # z
+        col="num_workers",  # separate plots along columns
+        row="network",  # seperate plots along rows
+        style="batch_size",
+        # size="total_steps",
+        legend="full",
+    )
+
+    plt.show()
+
+
+def plot_fixed_batch_size(save_file: str, no_learning: bool = False):
+    """Plot the results of the fixed batch size experiments."""
+    df = pd.read_csv(save_file)
+    print(str(df.columns))
+
+    # get batch size to closest power of 2
+    df["batch_size"] = np.power(
+        2,
+        np.ceil(
+            np.log(df["num_workers"] * df["num_envs_per_worker"] * df["num_steps"])
+            / np.log(2)
+        ),
+    ).astype(int)
+    # default num minibatches is 4
+    df["minibatch_size"] = df["batch_size"] // 4
+
+    sns.set_theme()
+    num_workers = df["num_workers"].unique().tolist()
+    num_workers.sort()
+    networks = df["network"].unique().tolist()
+    networks.sort()
+    batch_sizes = df["batch_size"].unique().tolist()
+    batch_sizes.sort()
+
+    y_keys = [
+        ("experience_sps", "experience_sps_std"),
+        ("learning_sps", "learning_sps_std"),
+        ("sps", None),
+    ]
     fig, axs = plt.subplots(
-        nrows=len(networks),
-        ncols=len(num_workers),
+        nrows=len(y_keys),
+        ncols=len(networks),
         squeeze=False,
         sharex=True,
         sharey=True,
     )
-    for row, network in enumerate(networks):
-        for col, num_worker in enumerate(num_workers):
+
+    # Plot the results for each worker count by batch size
+    df.sort_values(by=["batch_size"], inplace=True, ascending=True)
+    for row, (y, yerr) in enumerate(y_keys):
+        for col, network in enumerate(networks):
             ax = axs[row, col]
-            for num_envs in num_envs_per_worker:
+            for num_worker in num_workers:
                 df_subset = df[
-                    (df["network"] == network)
-                    & (df["num_workers"] == num_worker)
-                    & (df["num_envs_per_worker"] == num_envs)
+                    (df["network"] == network) & (df["num_workers"] == num_worker)
                 ]
-                ax.errorbar(
-                    x=df_subset["num_steps"],
-                    y=df_subset["experience_sps"],
-                    yerr=df_subset["experience_sps_std"],
-                    label=f"{num_envs}",
-                )
+
+                if yerr:
+                    ax.errorbar(
+                        x=df_subset["batch_size"],
+                        y=df_subset[y],
+                        yerr=df_subset[yerr],
+                        label=f"{num_worker}",
+                    )
+                else:
+                    ax.plot(
+                        df_subset["batch_size"],
+                        df_subset[y],
+                        label=f"{num_worker}",
+                    )
 
             if row == 0:
-                ax.set_title(f"Num workers={num_worker}")
+                ax.set_title(f"Network={network}")
+            if row == len(y_keys) - 1:
+                ax.set_xlabel("Batch size")
             if col == 0:
-                ax.set_ylabel(f"Network={network}\n\nEXP-SPS")
+                ax.set_ylabel(f"{y}")
 
     handles, labels = axs[0, 0].get_legend_handles_labels()
-    fig.legend(
-        handles, labels, loc="center right", ncol=1, title="Num envs\nper worker"
+    fig.legend(handles, labels, loc="center right", ncol=1, title="Num Workers")
+    fig.tight_layout(rect=(0, 0, 0.8, 1))
+
+    # her we do the same but inverted batch size by worker count
+    fig, axs = plt.subplots(
+        nrows=len(y_keys),
+        ncols=len(networks),
+        squeeze=False,
+        sharex=True,
+        sharey=True,
     )
-    fig.tight_layout(rect=(0, 0, 0.85, 1))
 
-    # sns.relplot(
-    #     data=df,
-    #     kind="line",
-    #     x="num_steps",
-    #     y="esps",
-    #     hue="num_envs_per_worker",  # z
-    #     col="num_workers",  # separate plots along columns
-    #     row="network",  # seperate plots along rows
-    #     style="num_envs_per_worker",
-    #     # size="total_steps",
-    #     legend="full",
-    # )
+    df.sort_values(by=["num_workers"], inplace=True, ascending=True)
+    for row, (y, yerr) in enumerate(y_keys):
+        for col, network in enumerate(networks):
+            ax = axs[row, col]
+            for batch_size in batch_sizes:
+                df_subset = df[
+                    (df["network"] == network) & (df["batch_size"] == batch_size)
+                ]
+                if yerr:
+                    ax.errorbar(
+                        x=num_workers,
+                        y=df_subset[y],
+                        yerr=df_subset[yerr],
+                        label=f"{batch_size}",
+                    )
+                else:
+                    ax.plot(
+                        num_workers,
+                        df_subset[y],
+                        label=f"{batch_size}",
+                    )
 
-    # plt.yscale("log")
+            if row == 0:
+                ax.set_title(f"Network={network}")
+            if row == len(y_keys) - 1:
+                ax.set_xlabel("Num Workers")
+            if col == 0:
+                ax.set_ylabel(f"{y}")
+
+    handles, labels = axs[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="center right", ncol=1, title="Batch Size")
+    fig.tight_layout(rect=(0, 0, 0.8, 1))
 
     plt.show()
 
@@ -511,10 +706,45 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable learning step. Useful for testing experience gathering speed.",
     )
+    parser.add_argument(
+        "--fixed-batch-size",
+        action="store_true",
+        help=(
+            "Run SPS benchmarking for fixed batch sizes and seq len. For each batch "
+            "size and number of workers the number of environments per worker is "
+            "chosen such that the batch size is reached."
+        ),
+    )
+    parser.add_argument(
+        "--save-file",
+        type=str,
+        default=None,
+        help=(
+            "Path to csv file to save results to. If not specified, results are "
+            "saved to a default location."
+        ),
+    )
     args = parser.parse_args()
-    if args.action == "run":
-        run(args.append_results, args.no_learning)
-    elif args.action == "plot":
-        plot(args.no_learning)
+
+    save_file_arg = args.save_file
+    if not save_file_arg:
+        if args.fixed_batch_size and args.no_learning:
+            save_file_name = "benchmarking_results_fixed_batch_no_learning.csv"
+        elif args.fixed_batch_size:
+            save_file_name = "benchmarking_results_fixed_batch.csv"
+        elif args.no_learning:
+            save_file_name = "benchmarking_results_no_learning.csv"
+        else:
+            save_file_name = "benchmarking_results.csv"
+        save_file_arg = os.path.join(os.path.dirname(__file__), save_file_name)
+
+    if args.action == "run" and not args.fixed_batch_size:
+        run(save_file_arg, args.append_results, args.no_learning)
+    elif args.action == "run" and args.fixed_batch_size:
+        run_fixed_batch_size(save_file_arg, args.append_results, args.no_learning)
+    elif args.action == "plot" and not args.fixed_batch_size:
+        plot(save_file_arg, args.no_learning)
+    elif args.action == "plot" and args.fixed_batch_size:
+        plot_fixed_batch_size(save_file_arg, args.no_learning)
     else:
         raise ValueError("Invalid action")
