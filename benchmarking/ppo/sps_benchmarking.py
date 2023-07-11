@@ -458,7 +458,6 @@ def run_fixed_batch_size(
             f"num_workers={nw}, num_envs_per_worker={ne}, "
             f"num_steps={FIXED_BATCH_EXP_SEQ_LEN} for {total_timesteps} steps"
         )
-        continue
         network = NETWORKS[net_name]
         config = PPOConfig(
             total_timesteps=total_timesteps,
