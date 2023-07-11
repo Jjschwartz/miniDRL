@@ -58,10 +58,10 @@ BATCH_SIZES = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
 FIXED_BATCH_EXP_SEQ_LEN = 128
 
 # smaller exp
-# NUM_WORKERS = [1, 2, 3, 4]
+# NUM_WORKERS = [4]
 # NUM_ENVS_PER_WORKER = [1, 4]
 # NUM_STEPS = [32, 64]
-# BATCH_SIZES = [1024, 2048, 4096, 8192, 16384, 32768]
+# BATCH_SIZES = [131072, 262144, 524288, 1048576]
 
 
 def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
@@ -434,17 +434,18 @@ def run_fixed_batch_size(
     append_results: bool = False,
     no_learning: bool = False,
 ):
+    print("Running benchmarking fixed batch size experiments")
+    print(f"Saving results to: {save_file}")
+    num_exps = len(NETWORKS) * len(BATCH_SIZES)
+    print(f"Running a total of {num_exps} experiments")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Running on device: {device}")
+
     header_written, exp_num = False, 0
     if append_results:
         header_written = True
         with open(save_file, "r") as f:
             exp_num = len(f.readlines()) - 1
-
-    print("Running benchmarking fixed batch size experiments")
-    num_exps = len(NETWORKS) * len(BATCH_SIZES)
-    print(f"Running a total of {num_exps} experiments")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Running on device: {device}")
 
     for net_name, nw, batch_size in product(NETWORKS, NUM_WORKERS, BATCH_SIZES):
         # Num envs per worker
