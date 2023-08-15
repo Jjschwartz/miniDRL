@@ -98,7 +98,7 @@ def run_rollout_worker(
         mean_ep_returns = 0.0
         mean_ep_lens = 0.0
         num_episodes = 0
-        for step in range(0, config.num_steps):
+        for step in range(0, config.num_rollout_steps):
             obs[step] = next_obs
             dones[step] = next_done
 
@@ -280,14 +280,16 @@ def run_ppo(config: PPOConfig):
     model.to(device)
 
     # Experience buffer setup
-    total_num_envs, num_steps = config.total_num_envs, config.num_steps
-    obs = torch.zeros((num_steps, total_num_envs) + obs_space.shape).to(device)
-    actions = torch.zeros((num_steps, total_num_envs) + act_space.shape).to(device)
-    logprobs = torch.zeros((num_steps, total_num_envs)).to(device)
-    rewards = torch.zeros((num_steps, total_num_envs)).to(device)
+    total_num_envs, num_rollout_steps = config.total_num_envs, config.num_rollout_steps
+    obs = torch.zeros((num_rollout_steps, total_num_envs) + obs_space.shape).to(device)
+    actions = torch.zeros((num_rollout_steps, total_num_envs) + act_space.shape).to(
+        device
+    )
+    logprobs = torch.zeros((num_rollout_steps, total_num_envs)).to(device)
+    rewards = torch.zeros((num_rollout_steps, total_num_envs)).to(device)
     # +1 for bootstrapped value
-    dones = torch.zeros((num_steps + 1, total_num_envs)).to(device)
-    values = torch.zeros((num_steps + 1, total_num_envs)).to(device)
+    dones = torch.zeros((num_rollout_steps + 1, total_num_envs)).to(device)
+    values = torch.zeros((num_rollout_steps + 1, total_num_envs)).to(device)
     # buffer for storing lstm state for each worker-env at start of each update
     initial_lstm_state = (
         torch.zeros(model.lstm.num_layers, total_num_envs, model.lstm.hidden_size).to(
@@ -448,7 +450,7 @@ def run_ppo(config: PPOConfig):
         # calculate advantages and monte-carlo returns
         advantages = torch.zeros_like(rewards).to(device)
         lastgaelam = 0
-        for t in reversed(range(config.num_steps)):
+        for t in reversed(range(config.num_rollout_steps)):
             nextnonterminal = 1.0 - dones[t + 1]
             nextvalues = values[t + 1]
             delta = rewards[t] + config.gamma * nextvalues * nextnonterminal - values[t]
@@ -472,7 +474,7 @@ def run_ppo(config: PPOConfig):
         envsperbatch = total_num_envs // config.num_minibatches
         envinds = np.arange(total_num_envs)
         flatinds = np.arange(config.batch_size).reshape(
-            config.num_steps, total_num_envs
+            config.num_rollout_steps, total_num_envs
         )
         clipfracs = []
         approx_kl, old_approx_kl, entropy_loss, pg_loss, v_loss = 0, 0, 0, 0, 0

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
+import logging
 from dataclasses import dataclass, field
 from distutils.util import strtobool
 
@@ -100,28 +101,33 @@ class PPOConfig:
     # ----------------------
     # total timesteps of the experiments
     total_timesteps: int = 10000000
+    # number of rollout workers
+    num_workers: int = 4
     # number of parallel environments per worker
     num_envs_per_worker: int = 4
     # number of steps of the vectorized environment per update
-    num_steps: int = 128
-    # number of rollout workers
-    num_workers: int = 4
+    num_rollout_steps: int = 128
     # number of mini-batches per update
+    # is overwritten if minibatch_size is provided
     num_minibatches: int = 4
+    # size of the mini-batches (in terms of timesteps)
+    # if not provided (i.e. is set to -1), then
+    # minibatch_size = int(batch_size // num_minibatches)
+    minibatch_size: int = -1
     # total number of environments
     # total_num_envs = num_envs_per_worker * num_workers
     total_num_envs: int = field(init=False)
     # number of steps per update batch
-    # batch_size = num_steps * num_envs_per_worker * num_workers
+    # batch_size = num_rollout_steps * num_envs_per_worker * num_workers
     batch_size: int = field(init=False)
     # total number of updates
     # num_updates = total_timesteps // batch_size
     num_updates: int = field(init=False)
-    # size of the mini-batches (in terms of timesteps)
-    # minibatch_size = int(batch_size // num_minibatches)
-    minibatch_size: int = field(init=False)
+
+    # Loss and update hyperparameters
+    # -------------------------------
     # number of epochs to update the policy per update
-    update_epochs: int = 4
+    update_epochs: int = 2
     # learning rate of the optimizer
     learning_rate: float = 2.5e-4
     # whether to anneal the learning rate linearly to zero
@@ -144,8 +150,6 @@ class PPOConfig:
     max_grad_norm: float = 0.5
     # the target KL divergence threshold
     target_kl: float | None = None
-    # number of steps after which the model is saved
-    save_interval: int = 0
 
     # Model configuration
     # -------------------
@@ -166,6 +170,11 @@ class PPOConfig:
     # number of steps per evaluation (per eval environment)
     eval_num_steps: int = 1500
 
+    # Other configuration
+    # -------------------
+    # number of steps after which the model is saved
+    save_interval: int = 0
+
     def __post_init__(self):
         """Post initialization."""
         self.run_name = f"{self.exp_name}_{self.env_id}_{self.seed}_{int(time.time())}"
@@ -176,13 +185,25 @@ class PPOConfig:
         )
 
         self.total_num_envs = self.num_envs_per_worker * self.num_workers
-        self.batch_size = self.num_steps * self.total_num_envs
+        self.batch_size = self.num_rollout_steps * self.total_num_envs
         self.num_updates = int(self.total_timesteps // self.batch_size)
-        self.minibatch_size = int(self.batch_size // self.num_minibatches)
-        assert self.total_num_envs % self.num_minibatches == 0, (
-            "The number of parallel environments (num_envs_per_worker * num_workers) "
-            "must be a multiple of the number of minibatches."
-        )
+
+        if self.minibatch_size == -1:
+            self.minibatch_size = int(self.batch_size // self.num_minibatches)
+        else:
+            self.num_minibatches = int(self.batch_size // self.minibatch_size)
+
+        if self.total_num_envs % self.num_minibatches != 0:
+            logging.warn(
+                "The total number of parallel environments `%d` (num_envs_per_worker * "
+                "num_workers) isn't a multiple of the number of minibatches `%d`. PPO "
+                "will still run, but the trajectories from some environments may not "
+                "be used for training. Consider using a different `minibatch_size`, "
+                "`num_minibatches`, `num_workers`, or `num_envs_per_worker`. for "
+                "maximum efficiency.",
+                self.total_num_envs,
+                self.num_minibatches,
+            )
 
     def load_model(self):
         """Load the model."""
@@ -226,7 +247,7 @@ def parse_ppo_args() -> PPOConfig:
         help="the number of rollout workers collecting trajectories in parallel")
     parser.add_argument("--num-envs-per-worker", type=int, default=4,
         help="the number of parallel game environments")
-    parser.add_argument("--num-steps", type=int, default=128,
+    parser.add_argument("--num-rollout-steps", type=int, default=128,
         help="the number of steps to run in each environment per policy rollout")
     parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggle learning rate annealing for policy and value networks")

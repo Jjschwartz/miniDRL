@@ -1,4 +1,47 @@
-"""Script for testing SPS of different PPO configurations."""
+"""Script for testing SPS of different PPO configurations.
+
+Specifically, we measure the steps-per-second (SPS) executed by PPO during training
+for different batch sizes and number of workers. 
+
+Along with the total SPS, we also measure the SPS for experience collection and
+learning steps separately. This is useful for determining how our algorithm scales
+in each of these aspects as we increase the number of workers for different batch sizes.
+
+Note, for each experiment we keep the minibatch size constant, and similarly for the 
+number of rollout steps. Furthermore, the number of environments per worker is
+calculated based on the batch size and number of workers.
+
+The results of each experiment are saved to a csv file. The results can then be plotted
+using the `plot` action of this script.
+
+The script supports running benchmarking for both the simple gym environments (it uses
+"CartPole-v1" by default), as well as atari environments ("Pong" is used by default).
+
+Example usage, run benchmarking for CartPole-v1:
+
+    python benchmarking.py run
+
+Example usage, run benchmarking for Pong:
+
+    python benchmarking.py run --atari
+
+Example usage, plot results for CartPole-v1:
+
+    python benchmarking.py plot
+
+Example usage, plot results for Pong (using default save file):
+
+    python benchmarking.py plot --atari
+
+    
+Note each of the above will save and load results to a default location. To specify a 
+custom save location, use the `--save-file` argument.
+
+For all options, run:
+
+    python benchmarking.py --help
+
+"""
 import os
 import random
 import time
@@ -13,55 +56,51 @@ import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.optim as optim
 
-from d2rl.ppo.network import PPONetwork
 from d2rl.ppo.ppo import run_rollout_worker
 from d2rl.ppo.utils import PPOConfig
+from d2rl.ppo.run_atari import get_atari_env_creator_fn, atari_model_loader
 
-DEFAULT_CONFIG = {
+CARTPOLE_CONFIG = {
     "exp_name": "ppo_benchmarking",
     "seed": 0,
     "torch_deterministic": True,
     "cuda": True,
     "track_wandb": False,
     "env_id": "CartPole-v1",
-    "num_minibatches": 1,
+    "num_rollout_steps": 128,
+    "trunk_sizes": [64],
+    "lstm_size": 64,
+    "head_sizes": [64],
+    "minibatch_size": 2048,
 }
 
-NETWORKS = {
-    "small": {
-        "trunk_sizes": [64],
-        "lstm_size": 64,
-        "head_sizes": [64],
-    },
-    # "medium": {
-    #     "trunk_sizes": [128, 128],
-    #     "lstm_size": 128,
-    #     "head_sizes": [128, 128],
-    # },
-    # "large": {
-    #     "trunk_sizes": [256, 256, 256],
-    #     "lstm_size": 256,
-    #     "head_sizes": [256, 256, 256],
-    # },
+ATARI_CONFIG = {
+    "exp_name": "ppo_benchmarking_atari",
+    "seed": 0,
+    "torch_deterministic": True,
+    "cuda": True,
+    "track_wandb": False,
+    "env_id": "PongNoFrameskip-v4",
+    "env_creator_fn_getter": get_atari_env_creator_fn,
+    "model_loader": atari_model_loader,
+    "num_rollout_steps": 128,
+    "minibatch_size": 2048,
 }
+
 
 # number of updates to run per experiment
 NUM_UPDATES = 20
-MAX_BATCH_SIZE = 2**17  # 131072
 
 # full exp
 NUM_WORKERS = [1, 2, 3, 4, 8, 16, 32]
-NUM_ENVS_PER_WORKER = [1, 2, 3, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-NUM_STEPS = [32, 64, 128, 256, 512]
-# for fixed batch size experiment
-BATCH_SIZES = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
-FIXED_BATCH_EXP_SEQ_LEN = 128
+CARTPOLE_BATCH_SIZES = [2048, 4096, 8192, 16384, 32768, 65536, 131072]
+ATARI_BATCH_SIZES = [2048, 4096, 8192, 16384, 32768]
 
 # smaller exp
-# NUM_WORKERS = [4]
-# NUM_ENVS_PER_WORKER = [1, 4]
-# NUM_STEPS = [32, 64]
-# BATCH_SIZES = [131072, 262144, 524288, 1048576]
+# NUM_UPDATES = 5
+# NUM_WORKERS = [1, 2, 3]
+# CARTPOLE_BATCH_SIZES = [2048, 4096]
+# ATARI_BATCH_SIZES = [8192, 16384]
 
 
 def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
@@ -82,23 +121,20 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
 
     # model setup
     device = config.device
-    model = PPONetwork(
-        obs_space,
-        act_space,
-        trunk_sizes=config.trunk_sizes,
-        lstm_size=config.lstm_size,
-        head_sizes=config.head_sizes,
-    ).to(device)
+    model = config.load_model()
+    model.to(device)
 
     # Experience buffer setup
-    total_num_envs, num_steps = config.total_num_envs, config.num_steps
-    obs = torch.zeros((num_steps, total_num_envs) + obs_space.shape).to(device)
-    actions = torch.zeros((num_steps, total_num_envs) + act_space.shape).to(device)
-    logprobs = torch.zeros((num_steps, total_num_envs)).to(device)
-    rewards = torch.zeros((num_steps, total_num_envs)).to(device)
+    total_num_envs, num_rollout_steps = config.total_num_envs, config.num_rollout_steps
+    obs = torch.zeros((num_rollout_steps, total_num_envs) + obs_space.shape).to(device)
+    actions = torch.zeros((num_rollout_steps, total_num_envs) + act_space.shape).to(
+        device
+    )
+    logprobs = torch.zeros((num_rollout_steps, total_num_envs)).to(device)
+    rewards = torch.zeros((num_rollout_steps, total_num_envs)).to(device)
     # +1 for bootstrapped value
-    dones = torch.zeros((num_steps + 1, total_num_envs)).to(device)
-    values = torch.zeros((num_steps + 1, total_num_envs)).to(device)
+    dones = torch.zeros((num_rollout_steps + 1, total_num_envs)).to(device)
+    values = torch.zeros((num_rollout_steps + 1, total_num_envs)).to(device)
     # buffer for storing lstm state for each worker-env at start of each update
     initial_lstm_state = (
         torch.zeros(model.lstm.num_layers, total_num_envs, model.lstm.hidden_size).to(
@@ -214,7 +250,7 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
         # calculate advantages and monte-carlo returns
         advantages = torch.zeros_like(rewards).to(device)
         lastgaelam = 0
-        for t in reversed(range(config.num_steps)):
+        for t in reversed(range(config.num_rollout_steps)):
             nextnonterminal = 1.0 - dones[t + 1]
             nextvalues = values[t + 1]
             delta = rewards[t] + config.gamma * nextvalues * nextnonterminal - values[t]
@@ -238,7 +274,7 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
         envsperbatch = total_num_envs // config.num_minibatches
         envinds = np.arange(total_num_envs)
         flatinds = np.arange(config.batch_size).reshape(
-            config.num_steps, total_num_envs
+            config.num_rollout_steps, total_num_envs
         )
         clipfracs = []
         approx_kl = 0
@@ -349,94 +385,16 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
 
 
 def run(
-    save_file: str,
-    append_results: bool = False,
-    no_learning: bool = False,
-):
-    header_written, exp_num = False, 0
-    if append_results:
-        header_written = True
-        with open(save_file, "r") as f:
-            exp_num = len(f.readlines()) - 1
-
-    print("Running benchmarking experiments")
-    num_exps = (
-        len(NETWORKS) * len(NUM_WORKERS) * len(NUM_ENVS_PER_WORKER) * len(NUM_STEPS)
-    )
-    print(f"Running a total of {num_exps} experiments")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Running on device: {device}")
-
-    for net_name, nw, ne, ns in product(
-        NETWORKS, NUM_WORKERS, NUM_ENVS_PER_WORKER, NUM_STEPS
-    ):
-        # at least 1 update or 8192 steps (whichever is larger)
-        # at most 65536 steps or 10 updates (whichever is smaller)
-        # except if update size is bigger than 65536, then use update size
-        # total_timesteps = max(max(8192, nw * ne * ns), min(65536, 10 * nw * ne * ns))
-
-        # NUM_UPDATES updates (i.e. batches) per experiment
-        batch_size = nw * ne * ns
-        if batch_size > MAX_BATCH_SIZE:
-            # skip experiments with too large batch size
-            # since could be too large for CPU/GPU memory and also becomes impractical
-            continue
-
-        total_timesteps = NUM_UPDATES * batch_size
-
-        print(
-            f"Running exp_num={exp_num}, network={net_name}, num_workers={nw}, "
-            f"num_envs_per_worker={ne}, num_steps={ns} for {total_timesteps} steps"
-        )
-        network = NETWORKS[net_name]
-        config = PPOConfig(
-            total_timesteps=total_timesteps,
-            num_envs_per_worker=ne,
-            num_workers=nw,
-            num_steps=ns,
-            trunk_sizes=network["trunk_sizes"],
-            lstm_size=network["lstm_size"],
-            head_sizes=network["head_sizes"],
-            **DEFAULT_CONFIG,
-        )
-
-        result = run_benchmarking_ppo(config, no_learning=no_learning)
-        print(
-            f"SPS: {result['sps']} | "
-            f"EXP-SPS: {result['experience_sps']} +/- "
-            f"{result['experience_sps_std']:.2f} | "
-            f"LEARN-SPS: {result['learning_sps']} +/- "
-            f"{result['learning_sps_std']:.2f}"
-        )
-
-        if not header_written:
-            with open(save_file, "w") as f:
-                f.write(
-                    "exp_num,network,num_workers,num_envs_per_worker,num_steps,"
-                    + ",".join(result.keys())
-                    + "\n"
-                )
-            header_written = True
-
-        with open(save_file, "a") as f:
-            f.write(
-                f"{exp_num},{net_name},{nw},{ne},{ns},"
-                + ",".join(map(str, result.values()))
-                + "\n"
-            )
-        exp_num += 1
-
-    print("Benchmarking experiments finished")
-
-
-def run_fixed_batch_size(
+    num_workers: list[int],
+    batch_sizes: list[int],
+    config_kwargs: dict,
     save_file: str,
     append_results: bool = False,
     no_learning: bool = False,
 ):
     print("Running benchmarking fixed batch size experiments")
     print(f"Saving results to: {save_file}")
-    num_exps = len(NETWORKS) * len(BATCH_SIZES)
+    num_exps = len(num_workers) * len(batch_sizes)
     print(f"Running a total of {num_exps} experiments")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Running on device: {device}")
@@ -447,27 +405,22 @@ def run_fixed_batch_size(
         with open(save_file, "r") as f:
             exp_num = len(f.readlines()) - 1
 
-    for net_name, nw, batch_size in product(NETWORKS, NUM_WORKERS, BATCH_SIZES):
+    seq_len = config_kwargs["num_rollout_steps"]
+    for nw, batch_size in product(num_workers, batch_sizes):
         # Num envs per worker
-        ne = max(1, int(np.ceil(batch_size / (nw * FIXED_BATCH_EXP_SEQ_LEN))))
+        ne = max(1, int(np.ceil(batch_size / (nw * seq_len))))
 
         total_timesteps = NUM_UPDATES * batch_size
-
         print(
-            f"Running exp_num={exp_num}, network={net_name}, batch_size={batch_size}, "
+            f"Running exp_num={exp_num}, batch_size={batch_size}, "
             f"num_workers={nw}, num_envs_per_worker={ne}, "
-            f"num_steps={FIXED_BATCH_EXP_SEQ_LEN} for {total_timesteps} steps"
+            f"num_rollout_steps={seq_len} for {total_timesteps} steps"
         )
-        network = NETWORKS[net_name]
         config = PPOConfig(
             total_timesteps=total_timesteps,
             num_envs_per_worker=ne,
             num_workers=nw,
-            num_steps=FIXED_BATCH_EXP_SEQ_LEN,
-            trunk_sizes=network["trunk_sizes"],
-            lstm_size=network["lstm_size"],
-            head_sizes=network["head_sizes"],
-            **DEFAULT_CONFIG,
+            **config_kwargs,
         )
 
         result = run_benchmarking_ppo(config, no_learning=no_learning)
@@ -482,7 +435,8 @@ def run_fixed_batch_size(
         if not header_written:
             with open(save_file, "w") as f:
                 f.write(
-                    "exp_num,network,num_workers,num_envs_per_worker,num_steps,"
+                    "exp_num,num_workers,batch_size,num_envs_per_worker,"
+                    + "num_rollout_steps,minibatch_size,num_minibatches,"
                     + ",".join(result.keys())
                     + "\n"
                 )
@@ -490,7 +444,8 @@ def run_fixed_batch_size(
 
         with open(save_file, "a") as f:
             f.write(
-                f"{exp_num},{net_name},{nw},{ne},{FIXED_BATCH_EXP_SEQ_LEN},"
+                f"{exp_num},{nw},{batch_size},{ne},"
+                + f"{seq_len},{config.minibatch_size},{config.num_minibatches},"
                 + ",".join(map(str, result.values()))
                 + "\n"
             )
@@ -499,86 +454,8 @@ def run_fixed_batch_size(
     print("Benchmarking experiments finished")
 
 
-def plot(save_file: str, no_learning: bool = False):
-    df = pd.read_csv(save_file)
-    print(str(df.columns))
-
-    df["batch_size"] = df["num_workers"] * df["num_envs_per_worker"] * df["num_steps"]
-    # default num minibatches is 4
-    df["minibatch_size"] = df["batch_size"] // 4
-
-    sns.set_theme()
-    num_workers = df["num_workers"].unique().tolist()
-    num_workers.sort()
-    networks = df["network"].unique().tolist()
-    networks.sort()
-    num_envs_per_worker = df["num_envs_per_worker"].unique().tolist()
-    num_envs_per_worker.sort()
-
-    for y, yerr in [
-        ("experience_sps", "experience_sps_std"),
-        ("learning_sps", "learning_sps_std"),
-        ("sps", None),
-    ]:
-        fig, axs = plt.subplots(
-            nrows=len(networks),
-            ncols=len(num_workers),
-            squeeze=False,
-            sharex=True,
-            sharey=True,
-        )
-        for row, network in enumerate(networks):
-            for col, num_worker in enumerate(num_workers):
-                ax = axs[row, col]
-                for num_envs in num_envs_per_worker:
-                    df_subset = df[
-                        (df["network"] == network)
-                        & (df["num_workers"] == num_worker)
-                        & (df["num_envs_per_worker"] == num_envs)
-                    ]
-                    if yerr:
-                        ax.errorbar(
-                            x=df_subset["num_steps"],
-                            y=df_subset[y],
-                            yerr=df_subset[yerr],
-                            label=f"{num_envs}",
-                        )
-                    else:
-                        ax.plot(
-                            df_subset["num_steps"],
-                            df_subset[y],
-                            label=f"{num_envs}",
-                        )
-
-                if row == 0:
-                    ax.set_title(f"Num workers={num_worker}")
-                if col == 0:
-                    ax.set_ylabel(f"Network={network}\n\n{y}")
-
-        handles, labels = axs[0, 0].get_legend_handles_labels()
-        fig.legend(
-            handles, labels, loc="center right", ncol=1, title="Num envs\nper worker"
-        )
-        fig.tight_layout(rect=(0, 0, 0.85, 1))
-
-    sns.relplot(
-        data=df,
-        kind="line",
-        x="num_steps",
-        y="sps",
-        hue="batch_size",  # z
-        col="num_workers",  # separate plots along columns
-        row="network",  # seperate plots along rows
-        style="batch_size",
-        # size="total_steps",
-        legend="full",
-    )
-
-    plt.show()
-
-
-def plot_fixed_batch_size(save_file: str, no_learning: bool = False):
-    """Plot the results of the fixed batch size experiments."""
+def plot(save_file: str):
+    """Plot the results of experiments."""
     df = pd.read_csv(save_file)
     print(str(df.columns))
 
@@ -586,18 +463,16 @@ def plot_fixed_batch_size(save_file: str, no_learning: bool = False):
     df["batch_size"] = np.power(
         2,
         np.ceil(
-            np.log(df["num_workers"] * df["num_envs_per_worker"] * df["num_steps"])
+            np.log(
+                df["num_workers"] * df["num_envs_per_worker"] * df["num_rollout_steps"]
+            )
             / np.log(2)
         ),
     ).astype(int)
-    # default num minibatches is 4
-    df["minibatch_size"] = df["batch_size"] // 4
 
     sns.set_theme()
     num_workers = df["num_workers"].unique().tolist()
     num_workers.sort()
-    networks = df["network"].unique().tolist()
-    networks.sort()
     batch_sizes = df["batch_size"].unique().tolist()
     batch_sizes.sort()
 
@@ -605,90 +480,85 @@ def plot_fixed_batch_size(save_file: str, no_learning: bool = False):
         ("experience_sps", "experience_sps_std"),
         ("learning_sps", "learning_sps_std"),
         ("sps", None),
+        ("num_envs_per_worker", None),
     ]
     fig, axs = plt.subplots(
         nrows=len(y_keys),
-        ncols=len(networks),
-        squeeze=False,
+        ncols=1,
+        squeeze=True,
         sharex=True,
-        sharey=True,
+        sharey=False,
     )
 
     # Plot the results for each worker count by batch size
     df.sort_values(by=["batch_size"], inplace=True, ascending=True)
     for row, (y, yerr) in enumerate(y_keys):
-        for col, network in enumerate(networks):
-            ax = axs[row, col]
-            for num_worker in num_workers:
-                df_subset = df[
-                    (df["network"] == network) & (df["num_workers"] == num_worker)
-                ]
+        ax = axs[row]
+        for num_worker in num_workers:
+            df_subset = df[(df["num_workers"] == num_worker)]
 
-                if yerr:
-                    ax.errorbar(
-                        x=df_subset["batch_size"],
-                        y=df_subset[y],
-                        yerr=df_subset[yerr],
-                        label=f"{num_worker}",
-                    )
-                else:
-                    ax.plot(
-                        df_subset["batch_size"],
-                        df_subset[y],
-                        label=f"{num_worker}",
-                    )
+            if yerr:
+                ax.errorbar(
+                    x=df_subset["batch_size"],
+                    y=df_subset[y],
+                    yerr=df_subset[yerr],
+                    label=f"{num_worker}",
+                )
+            else:
+                ax.plot(
+                    df_subset["batch_size"],
+                    df_subset[y],
+                    label=f"{num_worker}",
+                )
+        ax.set_ylabel(f"{y}")
+        if row == len(y_keys) - 1:
+            ax.set_xlabel("Batch size")
 
-            if row == 0:
-                ax.set_title(f"Network={network}")
-            if row == len(y_keys) - 1:
-                ax.set_xlabel("Batch size")
-            if col == 0:
-                ax.set_ylabel(f"{y}")
-
-    handles, labels = axs[0, 0].get_legend_handles_labels()
+    handles, labels = axs[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="center right", ncol=1, title="Num Workers")
     fig.tight_layout(rect=(0, 0, 0.8, 1))
 
     # her we do the same but inverted batch size by worker count
     fig, axs = plt.subplots(
         nrows=len(y_keys),
-        ncols=len(networks),
-        squeeze=False,
+        ncols=1,
+        squeeze=True,
         sharex=True,
-        sharey=True,
+        sharey=False,
     )
 
     df.sort_values(by=["num_workers"], inplace=True, ascending=True)
     for row, (y, yerr) in enumerate(y_keys):
-        for col, network in enumerate(networks):
-            ax = axs[row, col]
-            for batch_size in batch_sizes:
-                df_subset = df[
-                    (df["network"] == network) & (df["batch_size"] == batch_size)
-                ]
-                if yerr:
-                    ax.errorbar(
-                        x=num_workers,
-                        y=df_subset[y],
-                        yerr=df_subset[yerr],
-                        label=f"{batch_size}",
-                    )
-                else:
-                    ax.plot(
-                        num_workers,
-                        df_subset[y],
-                        label=f"{batch_size}",
-                    )
+        ax = axs[row]
+        for batch_size in batch_sizes:
+            df_subset = df[(df["batch_size"] == batch_size)]
+            if yerr:
+                ax.errorbar(
+                    x=df_subset["num_workers"],
+                    y=df_subset[y],
+                    yerr=df_subset[yerr],
+                    label=f"{batch_size}",
+                )
+            else:
+                ax.plot(
+                    df_subset["num_workers"],
+                    df_subset[y],
+                    label=f"{batch_size}",
+                )
 
-            if row == 0:
-                ax.set_title(f"Network={network}")
-            if row == len(y_keys) - 1:
-                ax.set_xlabel("Num Workers")
-            if col == 0:
-                ax.set_ylabel(f"{y}")
+        ax.set_yscale("log", base=2)
+        ax.set_ylabel(f"{y}")
+        if row == len(y_keys) - 1:
+            ax.set_xlabel("Num Workers")
 
-    handles, labels = axs[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="center right", ncol=1, title="Batch Size")
+    handles, labels = axs[0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="center right",
+        ncol=1,
+        title="Batch Size",
+    )
     fig.tight_layout(rect=(0, 0, 0.8, 1))
 
     plt.show()
@@ -701,20 +571,14 @@ if __name__ == "__main__":
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument("action", type=str, choices=["run", "plot"])
+    parser.add_argument(
+        "--atari", action="store_true", help="Run benchmarking on Atari environment."
+    )
     parser.add_argument("--append-results", action="store_true")
     parser.add_argument(
         "--no-learning",
         action="store_true",
         help="Disable learning step. Useful for testing experience gathering speed.",
-    )
-    parser.add_argument(
-        "--fixed-batch-size",
-        action="store_true",
-        help=(
-            "Run SPS benchmarking for fixed batch sizes and seq len. For each batch "
-            "size and number of workers the number of environments per worker is "
-            "chosen such that the batch size is reached."
-        ),
     )
     parser.add_argument(
         "--save-file",
@@ -729,23 +593,24 @@ if __name__ == "__main__":
 
     save_file_arg = args.save_file
     if not save_file_arg:
-        if args.fixed_batch_size and args.no_learning:
-            save_file_name = "benchmarking_results_fixed_batch_no_learning.csv"
-        elif args.fixed_batch_size:
-            save_file_name = "benchmarking_results_fixed_batch.csv"
-        elif args.no_learning:
-            save_file_name = "benchmarking_results_no_learning.csv"
-        else:
-            save_file_name = "benchmarking_results.csv"
+        save_file_name = "benchmarking_results"
+        if args.atari:
+            save_file_name += "_atari"
+        if args.no_learning:
+            save_file_name += "no_learning"
+        save_file_name += ".csv"
         save_file_arg = os.path.join(os.path.dirname(__file__), save_file_name)
 
-    if args.action == "run" and not args.fixed_batch_size:
-        run(save_file_arg, args.append_results, args.no_learning)
-    elif args.action == "run" and args.fixed_batch_size:
-        run_fixed_batch_size(save_file_arg, args.append_results, args.no_learning)
-    elif args.action == "plot" and not args.fixed_batch_size:
-        plot(save_file_arg, args.no_learning)
-    elif args.action == "plot" and args.fixed_batch_size:
-        plot_fixed_batch_size(save_file_arg, args.no_learning)
+    if args.action == "run":
+        run(
+            num_workers=NUM_WORKERS,
+            batch_sizes=ATARI_BATCH_SIZES if args.atari else CARTPOLE_BATCH_SIZES,
+            config_kwargs=ATARI_CONFIG if args.atari else CARTPOLE_CONFIG,
+            save_file=save_file_arg,
+            append_results=args.append_results,
+            no_learning=args.no_learning,
+        )
+    elif args.action == "plot":
+        plot(save_file_arg)
     else:
         raise ValueError("Invalid action")
