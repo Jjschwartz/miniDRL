@@ -166,7 +166,7 @@ def parse_ppo_atari_args() -> PPOConfig:
         help="if toggled, cuda will be enabled by default")
     parser.add_argument("--track-wandb", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="if toggled, this experiment will be tracked with Weights and Biases")
-    parser.add_argument("--wandb-project", type=str, default="porl",
+    parser.add_argument("--wandb-project", type=str, default="d2rl",
         help="the wandb's project name")
     parser.add_argument("--wandb-entity", type=str, default=None,
         help="the entity (team) of wandb's project")
@@ -180,15 +180,18 @@ def parse_ppo_atari_args() -> PPOConfig:
     # Training arguments
     parser.add_argument("--total-timesteps", type=int, default=200000000,
         help="total timesteps of the experiments")
+    parser.add_argument("--num-rollout-steps", type=int, default=128,
+        help="the number of steps to run in each environment per policy rollout")
     parser.add_argument("--num-workers", type=int, default=4,
         help="the number of rollout workers collecting trajectories in parallel")
     parser.add_argument("--num-envs-per-worker", type=int, default=32,
-        help="the number of parallel game environments")
-    parser.add_argument("--num-rollout-steps", type=int, default=128,
-        help="the number of steps to run in each environment per policy rollout")
-    parser.add_argument("--num-minibatches", type=int, default=8,
+        help="the number of parallel game environments, will be set automatically unless `--batch_size=-1`.")
+    parser.add_argument("--batch-size", type=int, default=16384,
+        help="the number of steps in each batch.")
+    parser.add_argument("--num-minibatches", type=int, default=4,
+        help="the number of mini-batches. Onle used if `--minibatch-size=-1`")
+    parser.add_argument("--minibatch-size", type=int, default=2048,
         help="the number of mini-batches")
-    
     
     # Loss and update hyperparameters
     parser.add_argument("--update-epochs", type=int, default=2,

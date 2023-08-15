@@ -101,12 +101,20 @@ class PPOConfig:
     # ----------------------
     # total timesteps of the experiments
     total_timesteps: int = 10000000
+    # number of steps of the vectorized environment per update
+    num_rollout_steps: int = 128
     # number of rollout workers
     num_workers: int = 4
     # number of parallel environments per worker
+    # is overwritten if batch_size is provided
     num_envs_per_worker: int = 4
-    # number of steps of the vectorized environment per update
-    num_rollout_steps: int = 128
+    # total number of environments
+    # total_num_envs = num_envs_per_worker * num_workers
+    total_num_envs: int = field(init=False)
+    # number of steps per update batch
+    # if not provided (i.e. is set to -1), then
+    # batch_size = num_rollout_steps * num_envs_per_worker * num_workers
+    batch_size: int = -1
     # number of mini-batches per update
     # is overwritten if minibatch_size is provided
     num_minibatches: int = 4
@@ -114,12 +122,6 @@ class PPOConfig:
     # if not provided (i.e. is set to -1), then
     # minibatch_size = int(batch_size // num_minibatches)
     minibatch_size: int = -1
-    # total number of environments
-    # total_num_envs = num_envs_per_worker * num_workers
-    total_num_envs: int = field(init=False)
-    # number of steps per update batch
-    # batch_size = num_rollout_steps * num_envs_per_worker * num_workers
-    batch_size: int = field(init=False)
     # total number of updates
     # num_updates = total_timesteps // batch_size
     num_updates: int = field(init=False)
@@ -177,21 +179,34 @@ class PPOConfig:
 
     def __post_init__(self):
         """Post initialization."""
-        self.run_name = f"{self.exp_name}_{self.env_id}_{self.seed}_{int(time.time())}"
+        self.run_name = self.exp_name
+        if self.env_id not in self.exp_name:
+            self.run_name += f"_{self.env_id}"
+        self.run_name += f"_{self.seed}_{int(time.time())}"
+
         self.log_dir = os.path.join(BASE_RESULTS_DIR, self.run_name)
         self.video_dir = os.path.join(self.log_dir, "videos")
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() and self.cuda else "cpu"
         )
 
-        self.total_num_envs = self.num_envs_per_worker * self.num_workers
-        self.batch_size = self.num_rollout_steps * self.total_num_envs
-        self.num_updates = int(self.total_timesteps // self.batch_size)
+        if self.batch_size == -1:
+            self.total_num_envs = self.num_envs_per_worker * self.num_workers
+            self.batch_size = self.num_rollout_steps * self.total_num_envs
+        else:
+            assert self.batch_size % self.num_rollout_steps == 0
+            self.total_num_envs = self.batch_size // self.num_rollout_steps
+            assert self.total_num_envs % self.num_workers == 0
+            self.num_envs_per_worker = self.total_num_envs // self.num_workers
+
+        self.num_updates = self.total_timesteps // self.batch_size
 
         if self.minibatch_size == -1:
-            self.minibatch_size = int(self.batch_size // self.num_minibatches)
+            assert self.batch_size % self.num_minibatches == 0
+            self.minibatch_size = self.batch_size // self.num_minibatches
         else:
-            self.num_minibatches = int(self.batch_size // self.minibatch_size)
+            assert self.batch_size % self.minibatch_size == 0
+            self.num_minibatches = self.batch_size // self.minibatch_size
 
         if self.total_num_envs % self.num_minibatches != 0:
             logging.warn(

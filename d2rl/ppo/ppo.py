@@ -34,7 +34,7 @@ def run_rollout_worker(
     """
     # Limit each rollout worker to using a single CPU thread.
     # This prevents each rollout worker from using all available cores, which can
-    # cause lead to each rollout worker being slower due to contention.
+    # lead to each rollout worker being slower due to contention.
     torch.set_num_threads(1)
 
     # env setup
@@ -174,6 +174,8 @@ def run_evaluation_worker(
     In addition, will record videos of the evaluation episodes if requested.
 
     """
+    torch.set_num_threads(1)
+
     # env setup
     envs = gym.vector.SyncVectorEnv(
         [
@@ -183,9 +185,9 @@ def run_evaluation_worker(
     )
 
     # model setup
-    worker_model = config.load_model()
-    worker_model.to(config.device)
-    worker_model.eval()
+    device = config.device
+    eval_model = config.load_model()
+    eval_model.to(device)
 
     while True:
         # wait for main process to signal ready for evaluation
@@ -193,24 +195,25 @@ def run_evaluation_worker(
             # main process has finished training, so end work
             break
 
+        start_time = time.time()
         # sync weights
-        worker_model.load_state_dict(learner_model.state_dict())
+        eval_model.load_state_dict(learner_model.state_dict())
 
         # run evaluation episodes
         # reseting envs and all variables
-        next_obs = torch.Tensor(envs.reset()[0]).to(config.device)
-        next_done = torch.zeros(config.num_envs_per_worker).to(config.device)
+        next_obs = torch.Tensor(envs.reset()[0]).to(device)
+        next_done = torch.zeros(config.num_envs_per_worker).to(device)
         next_lstm_state = (
             torch.zeros(
-                worker_model.lstm.num_layers,
+                eval_model.lstm.num_layers,
                 config.num_envs_per_worker,
-                worker_model.lstm.hidden_size,
-            ).to(config.device),
+                eval_model.lstm.hidden_size,
+            ).to(device),
             torch.zeros(
-                worker_model.lstm.num_layers,
+                eval_model.lstm.num_layers,
                 config.num_envs_per_worker,
-                worker_model.lstm.hidden_size,
-            ).to(config.device),
+                eval_model.lstm.hidden_size,
+            ).to(device),
         )
         start_time = time.time()
         num_episodes = 0
@@ -221,19 +224,20 @@ def run_evaluation_worker(
         while num_episodes == 0 or steps < config.eval_num_steps:
             # sample next action
             with torch.no_grad():
-                action, _, _, _, next_lstm_state = worker_model.get_action_and_value(
+                action, _, _, _, next_lstm_state = eval_model.get_action_and_value(
                     next_obs, next_lstm_state, next_done
                 )
 
             # execute step and log data.
-            next_obs, reward, terminated, truncated, info = envs.step(
-                action.cpu().numpy()
-            )
+            next_obs, _, terminated, truncated, info = envs.step(action.cpu().numpy())
 
             done = terminated | truncated
-            next_obs = torch.Tensor(next_obs).to(config.device)
-            next_done = torch.Tensor(done).to(config.device)
+            next_obs = torch.Tensor(next_obs).to(device)
+            next_done = torch.Tensor(done).to(device)
             steps += 1
+
+            if steps % (config.eval_num_steps // 10) == 0:
+                print(f"Eval progress: {steps}/{config.eval_num_steps}")
 
             for item in [
                 i
@@ -244,16 +248,21 @@ def run_evaluation_worker(
                 episode_returns_total += item["episode"]["r"][0]
                 episode_lengths_total += item["episode"]["l"][0]
 
-        envs.close()
+        eval_time = time.time() - start_time
+        total_steps = steps * config.num_envs_per_worker
         output_queue.put(
             {
-                "steps": steps,
+                "total_steps": total_steps,
+                "parallel_steps": steps,
+                "SPS": int(total_steps / eval_time),
                 "num_episodes": num_episodes,
                 "episodic_return": episode_returns_total / num_episodes,
                 "episodic_length": episode_lengths_total / num_episodes,
-                "time": time.time() - start_time,
+                "time": eval_time,
             }
         )
+
+    envs.close()
 
 
 def run_ppo(config: PPOConfig):
@@ -391,13 +400,15 @@ def run_ppo(config: PPOConfig):
         "|param|value|\n|-|-|\n%s"
         % ("\n".join([f"|{key}|{value}|" for key, value in vars(config).items()])),
     )
+    uploaded_video_files = set()
 
     # Optimizer setup
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate, eps=1e-5)
 
     # Training loop
+    print("Starting training loop...")
     global_step = 0
-    start_time = time.time()
+    sps_start_time = time.time()
     for update in range(1, config.num_updates + 1):
         if config.anneal_lr:
             frac = 1.0 - (update - 1.0) / config.num_updates
@@ -405,18 +416,24 @@ def run_ppo(config: PPOConfig):
             optimizer.param_groups[0]["lr"] = lrnow
 
         # run evaluation
-        if config.eval_interval > 0 and update % config.eval_interval == 1:
+        if config.eval_interval > 0 and update % config.eval_interval == 0:
             print("Running evaluation...")
+            eval_start_time = time.time()
             eval_input_queue.put(1)
             eval_results = eval_output_queue.get()
 
             print(
                 f"global_step={global_step}, "
                 f"evaluation/episodic_return={eval_results['episodic_return']:.2f}, "
-                f"evaluation/episodic_length={eval_results['episodic_length']:.2f}"
+                f"evaluation/episodic_length={eval_results['episodic_length']:.2f}, "
+                f"evaluation/SPS={eval_results['SPS']:.2f}, "
+                f"evaluation/time={eval_results['time']:.2f}"
             )
             for key, value in eval_results.items():
                 writer.add_scalar(f"evaluation/{key}", value, global_step)
+            # remove evaluation time from sps timer
+            # otherwise results will be skewed by evaluation time
+            sps_start_time += time.time() - eval_start_time
 
         experience_collection_start_time = time.time()
         # signal workers to collect next batch of experience
@@ -436,7 +453,7 @@ def run_ppo(config: PPOConfig):
         if mean_episode_len > 0:
             # only log if there were episodes completed
             print(
-                f"{timedelta(seconds=int(time.time()-start_time))} "
+                f"{timedelta(seconds=int(time.time()-sps_start_time))} "
                 f"global_step={global_step}, "
                 f"episodic_return={mean_episode_return:.2f}, "
                 f"episodic_length={mean_episode_len:.2f}"
@@ -570,7 +587,7 @@ def run_ppo(config: PPOConfig):
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
 
         # record timing stats
-        sps = int(global_step / (time.time() - start_time))
+        sps = int(global_step / (time.time() - sps_start_time))
         print("SPS:", sps)
         writer.add_scalar("charts/SPS", sps, global_step)
         writer.add_scalar(
@@ -590,6 +607,26 @@ def run_ppo(config: PPOConfig):
                 },
                 os.path.join(config.log_dir, f"checkpoint_{update}.pt"),
             )
+
+        if config.capture_video and config.track_wandb:
+            video_filenames = [
+                fname
+                for fname in os.listdir(config.video_dir)
+                if fname.endswith(".mp4")
+            ]
+            video_filenames.sort()
+            for filename in video_filenames:
+                if filename not in uploaded_video_files:
+                    print("Uploading video:", filename)
+                    wandb.log(  # type:ignore
+                        {
+                            "video": wandb.Video(  # type:ignore
+                                os.path.join(config.video_dir, filename)
+                            )
+                        }
+                    )
+                    uploaded_video_files.add(filename)
+                    break
 
     env.close()
     writer.close()

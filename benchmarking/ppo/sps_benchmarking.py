@@ -459,17 +459,6 @@ def plot(save_file: str):
     df = pd.read_csv(save_file)
     print(str(df.columns))
 
-    # get batch size to closest power of 2
-    df["batch_size"] = np.power(
-        2,
-        np.ceil(
-            np.log(
-                df["num_workers"] * df["num_envs_per_worker"] * df["num_rollout_steps"]
-            )
-            / np.log(2)
-        ),
-    ).astype(int)
-
     sns.set_theme()
     num_workers = df["num_workers"].unique().tolist()
     num_workers.sort()
@@ -518,7 +507,7 @@ def plot(save_file: str):
     fig.legend(handles, labels, loc="center right", ncol=1, title="Num Workers")
     fig.tight_layout(rect=(0, 0, 0.8, 1))
 
-    # her we do the same but inverted batch size by worker count
+    # here we do the same but inverted batch size by worker count
     fig, axs = plt.subplots(
         nrows=len(y_keys),
         ncols=1,
@@ -546,7 +535,7 @@ def plot(save_file: str):
                     label=f"{batch_size}",
                 )
 
-        ax.set_yscale("log", base=2)
+        # ax.set_yscale("log", base=2)
         ax.set_ylabel(f"{y}")
         if row == len(y_keys) - 1:
             ax.set_xlabel("Num Workers")
@@ -558,6 +547,51 @@ def plot(save_file: str):
         loc="center right",
         ncol=1,
         title="Batch Size",
+    )
+    fig.tight_layout(rect=(0, 0, 0.8, 1))
+
+    # Next we plot SPS versus num_envs_per_worker by worker count
+    fig, axs = plt.subplots(
+        nrows=len(y_keys[:-1]),
+        ncols=1,
+        squeeze=True,
+        sharex=True,
+        sharey=False,
+    )
+
+    df.sort_values(by=["num_envs_per_worker"], inplace=True, ascending=True)
+    for row, (y, yerr) in enumerate(y_keys[:-1]):
+        ax = axs[row]
+        for num_worker in num_workers:
+            df_subset = df[(df["num_workers"] == num_worker)]
+
+            if yerr:
+                ax.errorbar(
+                    x=df_subset["num_envs_per_worker"],
+                    y=df_subset[y],
+                    yerr=df_subset[yerr],
+                    label=f"{num_worker}",
+                )
+            else:
+                ax.plot(
+                    df_subset["num_envs_per_worker"],
+                    df_subset[y],
+                    label=f"{num_worker}",
+                )
+
+        # ax.set_yscale("log", base=2)
+        ax.set_ylabel(f"{y}")
+        ax.set_xscale("log", base=2)
+        if row == len(y_keys[:-1]) - 1:
+            ax.set_xlabel("Num Envs Per Worker")
+
+    handles, labels = axs[0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="center right",
+        ncol=1,
+        title="Num Workers",
     )
     fig.tight_layout(rect=(0, 0, 0.8, 1))
 
