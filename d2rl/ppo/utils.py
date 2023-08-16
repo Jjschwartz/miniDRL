@@ -253,27 +253,33 @@ def parse_ppo_args() -> PPOConfig:
     parser.add_argument("--capture-video", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="whether to capture videos of the agent performances (check out `videos` folder)")
 
-    # Algorithm specific arguments
+    # Training arguments
     parser.add_argument("--total-timesteps", type=int, default=10000000,
         help="total timesteps of the experiments")
-    parser.add_argument("--learning-rate", type=float, default=2.5e-4,
-        help="the learning rate of the optimizer")
+    parser.add_argument("--num-rollout-steps", type=int, default=128,
+        help="the number of steps to run in each environment per policy rollout")
     parser.add_argument("--num-workers", type=int, default=4,
         help="the number of rollout workers collecting trajectories in parallel")
     parser.add_argument("--num-envs-per-worker", type=int, default=4,
-        help="the number of parallel game environments")
-    parser.add_argument("--num-rollout-steps", type=int, default=128,
-        help="the number of steps to run in each environment per policy rollout")
+        help="the number of parallel game environments, will be set automatically set unless `--batch_size=-1`.")
+    parser.add_argument("--batch-size", type=int, default=4096,
+        help="the number of steps in each batch. Automatically set if `--batch-size=-1`.")
+    parser.add_argument("--num-minibatches", type=int, default=4,
+        help="the number of mini-batches. Onle used if `--minibatch-size=-1`")
+    parser.add_argument("--minibatch-size", type=int, default=-1,
+        help="the number of mini-batches Automatically set if `--minibatch-size=-1`.")
+    
+    # Loss and update hyperparameters
+    parser.add_argument("--update-epochs", type=int, default=2,
+        help="the K epochs to update the policy")
+    parser.add_argument("--learning-rate", type=float, default=2.5e-4,
+        help="the learning rate of the optimizer")
     parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument("--gamma", type=float, default=0.99,
         help="the discount factor gamma")
     parser.add_argument("--gae-lambda", type=float, default=0.95,
         help="the lambda for the general advantage estimation")
-    parser.add_argument("--num-minibatches", type=int, default=4,
-        help="the number of mini-batches")
-    parser.add_argument("--update-epochs", type=int, default=4,
-        help="the K epochs to update the policy")
     parser.add_argument("--norm-adv", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles advantages normalization")
     parser.add_argument("--clip-coef", type=float, default=0.2,
