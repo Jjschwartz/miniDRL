@@ -581,7 +581,7 @@ def run_ppo(config: PPOConfig):
         )
         clipfracs = []
         approx_kl, old_approx_kl, unclipped_grad_norm = 0, 0, 0
-        entropy_loss, pg_loss, v_loss, loss = 0, 0, 0
+        entropy_loss, pg_loss, v_loss, loss = 0, 0, 0, 0
         for epoch in range(config.update_epochs):
             np.random.shuffle(seq_indxs)
 
