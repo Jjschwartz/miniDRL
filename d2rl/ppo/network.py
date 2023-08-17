@@ -75,12 +75,17 @@ class PPONetwork(nn.Module):
         """Get the next states from the LSTM.
 
         `batch_size` is typically the number of parallel environments contained in
-        the current batch.
+        the current batch, or the number of chunked sequences in the batch.
+
+        E.g. if each batch is collected from 8 parallel environments, and 128 steps
+        are collected from each environment, and we chunk each sequence of 128 steps
+        into 16 steps giving eight 16 step sequences per parallel environment, then
+        `batch_size` is 8 * 8 = 64 and `seq_len` is 16.
 
         Arguments
         ---------
         x: The input to the network. Shape (seq_len * batch_size, input_size).
-        lstm_state: The previous state of the LSTM. This is a tuple with two entrie,
+        lstm_state: The previous state of the LSTM. This is a tuple with two entries,
             each of which has shape=(lstm.num_layers, batch_size, lstm_size).
         done: Whether the episode is done, has shape=(seq_len * batch_size,).
 

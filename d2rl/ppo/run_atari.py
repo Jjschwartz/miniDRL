@@ -192,6 +192,8 @@ def parse_ppo_atari_args() -> PPOConfig:
         help="the number of mini-batches. Onle used if `--minibatch-size=-1`")
     parser.add_argument("--minibatch-size", type=int, default=2048,
         help="the number of mini-batches")
+    parser.add_argument("--seq-len", type=int, default=16,
+        help="the lengths of individual sequences used in training batches")
     
     # Loss and update hyperparameters
     parser.add_argument("--update-epochs", type=int, default=2,
@@ -206,7 +208,7 @@ def parse_ppo_atari_args() -> PPOConfig:
         help="the lambda for the general advantage estimation")
     parser.add_argument("--norm-adv", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles advantages normalization")
-    parser.add_argument("--clip-coef", type=float, default=0.2,
+    parser.add_argument("--clip-coef", type=float, default=0.1,
         help="the surrogate clipping coefficient")
     parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
@@ -214,7 +216,7 @@ def parse_ppo_atari_args() -> PPOConfig:
         help="coefficient of the entropy")
     parser.add_argument("--vf-coef", type=float, default=0.5,
         help="coefficient of the value function")
-    parser.add_argument("--max-grad-norm", type=float, default=5.0,
+    parser.add_argument("--max-grad-norm", type=float, default=0.5,
         help="the maximum norm for the gradient clipping")
     parser.add_argument("--target-kl", type=float, default=None,
         help="the target KL divergence threshold")

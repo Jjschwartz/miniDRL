@@ -103,6 +103,10 @@ class PPOConfig:
     total_timesteps: int = 10000000
     # number of steps of the vectorized environment per update
     num_rollout_steps: int = 128
+    # the lengths of individual sequences used in training batches
+    seq_len: int = 16
+    # the number of chunk sequences per rollout
+    num_seqs_per_rollout: int = field(init=False)
     # number of rollout workers
     num_workers: int = 4
     # number of parallel environments per worker
@@ -190,6 +194,9 @@ class PPOConfig:
             "cuda" if torch.cuda.is_available() and self.cuda else "cpu"
         )
 
+        assert self.num_rollout_steps % self.seq_len == 0
+        self.num_seqs_per_rollout = self.num_rollout_steps // self.seq_len
+
         if self.batch_size == -1:
             self.total_num_envs = self.num_envs_per_worker * self.num_workers
             self.batch_size = self.num_rollout_steps * self.total_num_envs
@@ -242,7 +249,7 @@ def parse_ppo_args() -> PPOConfig:
         help="if toggled, cuda will be enabled by default")
     parser.add_argument("--track-wandb", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="if toggled, this experiment will be tracked with Weights and Biases")
-    parser.add_argument("--wandb-project", type=str, default="porl",
+    parser.add_argument("--wandb-project", type=str, default="d2rl",
         help="the wandb's project name")
     parser.add_argument("--wandb-entity", type=str, default=None,
         help="the entity (team) of wandb's project")
@@ -268,6 +275,8 @@ def parse_ppo_args() -> PPOConfig:
         help="the number of mini-batches. Onle used if `--minibatch-size=-1`")
     parser.add_argument("--minibatch-size", type=int, default=-1,
         help="the number of mini-batches Automatically set if `--minibatch-size=-1`.")
+    parser.add_argument("--seq-len", type=int, default=16,
+        help="the lengths of individual sequences used in training batches")
     
     # Loss and update hyperparameters
     parser.add_argument("--update-epochs", type=int, default=2,
