@@ -676,7 +676,7 @@ def run_ppo(config: PPOConfig):
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         writer.add_scalar(
-            "losses/unclipped_grad_norm", unclipped_grad_norm, global_step
+            "losses/unclipped_grad_norm", unclipped_grad_norm.item(), global_step
         )
 
         # record timing stats
