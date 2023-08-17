@@ -688,7 +688,9 @@ def run_ppo(config: PPOConfig):
         )
         writer.add_scalar("charts/learning_time", learning_time, global_step)
 
-        if config.save_interval > 0 and update % config.save_interval == 0:
+        if config.save_interval > 0 and (
+            update % config.save_interval == 0 or update == config.num_updates
+        ):
             print("Saving model")
             torch.save(
                 {
