@@ -97,10 +97,10 @@ CARTPOLE_BATCH_SIZES = [2048, 4096, 8192, 16384, 32768, 65536, 131072]
 ATARI_BATCH_SIZES = [2048, 4096, 8192, 16384, 32768]
 
 # smaller exp
-# NUM_UPDATES = 5
-# NUM_WORKERS = [1, 2, 3]
-# CARTPOLE_BATCH_SIZES = [2048, 4096]
-# ATARI_BATCH_SIZES = [8192, 16384]
+NUM_UPDATES = 5
+NUM_WORKERS = [1, 2, 4]
+CARTPOLE_BATCH_SIZES = [2048, 4096]
+ATARI_BATCH_SIZES = [8192, 16384]
 
 
 def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
@@ -125,42 +125,33 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
     model.to(device)
 
     # Experience buffer setup
-    total_num_envs, num_rollout_steps = config.total_num_envs, config.num_rollout_steps
-    obs = torch.zeros((num_rollout_steps, total_num_envs) + obs_space.shape).to(device)
-    actions = torch.zeros((num_rollout_steps, total_num_envs) + act_space.shape).to(
-        device
-    )
-    logprobs = torch.zeros((num_rollout_steps, total_num_envs)).to(device)
-    rewards = torch.zeros((num_rollout_steps, total_num_envs)).to(device)
+    seq_len, num_seqs_per_rollout = config.seq_len, config.num_seqs_per_rollout
+    seqs_per_batch = config.total_num_envs * num_seqs_per_rollout
+    buf_shape = (seq_len, seqs_per_batch)
+    obs = torch.zeros(buf_shape + obs_space.shape).to(device)
+    actions = torch.zeros(buf_shape + act_space.shape).to(device)
+    logprobs = torch.zeros(buf_shape).to(device)
+    advantages = torch.zeros(buf_shape).to(device)
+    returns = torch.zeros(buf_shape).to(device)
     # +1 for bootstrapped value
-    dones = torch.zeros((num_rollout_steps + 1, total_num_envs)).to(device)
-    values = torch.zeros((num_rollout_steps + 1, total_num_envs)).to(device)
+    dones = torch.zeros(buf_shape).to(device)
+    values = torch.zeros(buf_shape).to(device)
     # buffer for storing lstm state for each worker-env at start of each update
     initial_lstm_state = (
-        torch.zeros(model.lstm.num_layers, total_num_envs, model.lstm.hidden_size).to(
+        torch.zeros(model.lstm.num_layers, seqs_per_batch, model.lstm.hidden_size).to(
             device
         ),
-        torch.zeros(model.lstm.num_layers, total_num_envs, model.lstm.hidden_size).to(
+        torch.zeros(model.lstm.num_layers, seqs_per_batch, model.lstm.hidden_size).to(
             device
         ),
     )
 
-    # buffers for tracking episode stats
-    ep_returns = torch.zeros((config.num_workers, 1)).cpu()
-    ep_lens = torch.zeros((config.num_workers, 1)).cpu()
+    # buffers for tracking episode stats (mean, min, max)
+    ep_returns = torch.zeros((config.num_workers, 3)).cpu()
+    ep_lens = torch.zeros((config.num_workers, 3)).cpu()
 
     # load model and buffers into shared memory
     model.share_memory()
-    obs.share_memory_()
-    actions.share_memory_()
-    logprobs.share_memory_()
-    rewards.share_memory_()
-    dones.share_memory_()
-    values.share_memory_()
-    initial_lstm_state[0].share_memory_()
-    initial_lstm_state[1].share_memory_()
-    ep_returns.share_memory_()
-    ep_lens.share_memory_()
 
     # Spawn workers
     # `fork` not supported by CUDA
@@ -172,11 +163,11 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
     input_queues = []
     output_queues = []
     workers = []
+    # placeholder for worker batch, so we can release it later
+    worker_batch = {}
     for worker_id in range(config.num_workers):
         input_queues.append(mp_ctxt.Queue())
         output_queues.append(mp_ctxt.Queue())
-        buf_idx_start = worker_id * config.num_envs_per_worker
-        buf_idx_end = buf_idx_start + config.num_envs_per_worker
         worker = mp_ctxt.Process(
             target=run_rollout_worker,
             args=(
@@ -185,18 +176,6 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
                 model,
                 input_queues[worker_id],
                 output_queues[worker_id],
-                [
-                    obs[:, buf_idx_start:buf_idx_end],
-                    actions[:, buf_idx_start:buf_idx_end],
-                    logprobs[:, buf_idx_start:buf_idx_end],
-                    rewards[:, buf_idx_start:buf_idx_end],
-                    dones[:, buf_idx_start:buf_idx_end],
-                    values[:, buf_idx_start:buf_idx_end],
-                    initial_lstm_state[0][:, buf_idx_start:buf_idx_end],
-                    initial_lstm_state[1][:, buf_idx_start:buf_idx_end],
-                    ep_returns[:, buf_idx_start:buf_idx_end],
-                    ep_lens[:, buf_idx_start:buf_idx_end],
-                ],
             ),
         )
         worker.start()
@@ -222,11 +201,6 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
     experience_collection_time = 0
     learning_time = 0
     for update in range(1, config.num_updates + 1):
-        if config.anneal_lr:
-            frac = 1.0 - (update - 1.0) / config.num_updates
-            lrnow = frac * config.learning_rate
-            optimizer.param_groups[0]["lr"] = lrnow
-
         experience_collection_start_time = time.time()
         # signal workers to collect next batch of experience
         for i in range(config.num_workers):
@@ -234,7 +208,29 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
 
         # wait for workers to finish collecting experience
         for i in range(config.num_workers):
-            output_queues[i].get()
+            worker_batch = output_queues[i].get()
+            buf_idx_start = i * (
+                config.num_envs_per_worker * config.num_seqs_per_rollout
+            )
+            buf_idx_end = buf_idx_start + (
+                config.num_envs_per_worker * config.num_seqs_per_rollout
+            )
+
+            obs[:, buf_idx_start:buf_idx_end] = worker_batch["obs"]
+            actions[:, buf_idx_start:buf_idx_end] = worker_batch["actions"]
+            logprobs[:, buf_idx_start:buf_idx_end] = worker_batch["logprobs"]
+            advantages[:, buf_idx_start:buf_idx_end] = worker_batch["advantages"]
+            returns[:, buf_idx_start:buf_idx_end] = worker_batch["returns"]
+            dones[:, buf_idx_start:buf_idx_end] = worker_batch["dones"]
+            values[:, buf_idx_start:buf_idx_end] = worker_batch["values"]
+            initial_lstm_state[0][:, buf_idx_start:buf_idx_end] = worker_batch[
+                "initial_lstm_states"
+            ][0]
+            initial_lstm_state[1][:, buf_idx_start:buf_idx_end] = worker_batch[
+                "initial_lstm_states"
+            ][1]
+            ep_returns[i] = worker_batch["ep_returns"]
+            ep_lens[i] = worker_batch["ep_lens"]
 
         # log episode stats
         experience_collection_time += time.time() - experience_collection_start_time
@@ -247,17 +243,6 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
             continue
 
         learning_start_time = time.time()
-        # calculate advantages and monte-carlo returns
-        advantages = torch.zeros_like(rewards).to(device)
-        lastgaelam = 0
-        for t in reversed(range(config.num_rollout_steps)):
-            nextnonterminal = 1.0 - dones[t + 1]
-            nextvalues = values[t + 1]
-            delta = rewards[t] + config.gamma * nextvalues * nextnonterminal - values[t]
-            advantages[t] = lastgaelam = (
-                delta + config.gamma * config.gae_lambda * nextnonterminal * lastgaelam
-            )
-        returns = advantages + values[:-1]
 
         # flatten the batch
         b_obs = obs.reshape((-1,) + obs_space.shape)
@@ -265,41 +250,38 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
         b_actions = actions.reshape((-1,) + act_space.shape)
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
-        # -1 to remove the last step, which is only used for calculating final
-        # advantage and returns
-        b_dones = dones[:-1].reshape(-1)
-        b_values = values[:-1].reshape(-1)
+        b_dones = dones.reshape(-1)
+        b_values = values.reshape(-1)
 
         # Optimizing the policy and value network
-        envsperbatch = total_num_envs // config.num_minibatches
-        envinds = np.arange(total_num_envs)
-        flatinds = np.arange(config.batch_size).reshape(
-            config.num_rollout_steps, total_num_envs
+        seqs_per_minibatch = seqs_per_batch // config.num_minibatches
+        seq_indxs = np.arange(seqs_per_batch)
+        flat_indxs = np.arange(config.batch_size).reshape(
+            config.seq_len, seqs_per_batch
         )
         clipfracs = []
         approx_kl = 0
         for epoch in range(config.update_epochs):
-            np.random.shuffle(envinds)
+            np.random.shuffle(seq_indxs)
 
             # do minibatch update
             # each minibatch uses data from randomized subset of envs
-            for start in range(0, total_num_envs, envsperbatch):
-                end = start + envsperbatch
-                mbenvinds = envinds[start:end]
-                mb_inds = flatinds[
-                    :, mbenvinds
-                ].ravel()  # be really careful about the index
+            for start in range(0, seqs_per_batch, seqs_per_minibatch):
+                end = start + seqs_per_minibatch
+                mb_seq_indxs = seq_indxs[start:end]
+                # be really careful about the index
+                mb_indxs = flat_indxs[:, mb_seq_indxs].ravel()
 
                 _, newlogprob, entropy, newvalue, _ = model.get_action_and_value(
-                    b_obs[mb_inds],
+                    b_obs[mb_indxs],
                     (
-                        initial_lstm_state[0][:, mbenvinds],
-                        initial_lstm_state[1][:, mbenvinds],
+                        initial_lstm_state[0][:, mb_seq_indxs],
+                        initial_lstm_state[1][:, mb_seq_indxs],
                     ),
-                    b_dones[mb_inds],
-                    b_actions.long()[mb_inds],
+                    b_dones[mb_indxs],
+                    b_actions.long()[mb_indxs],
                 )
-                logratio = newlogprob - b_logprobs[mb_inds]
+                logratio = newlogprob - b_logprobs[mb_indxs]
                 ratio = logratio.exp()
 
                 with torch.no_grad():
@@ -309,7 +291,7 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
                         ((ratio - 1.0).abs() > config.clip_coef).float().mean().item()
                     ]
 
-                mb_advantages = b_advantages[mb_inds]
+                mb_advantages = b_advantages[mb_indxs]
                 if config.norm_adv:
                     mb_advantages = (mb_advantages - mb_advantages.mean()) / (
                         mb_advantages.std() + 1e-8
@@ -325,17 +307,17 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
                 # Value loss
                 newvalue = newvalue.view(-1)
                 if config.clip_vloss:
-                    v_loss_unclipped = (newvalue - b_returns[mb_inds]) ** 2
-                    v_clipped = b_values[mb_inds] + torch.clamp(
-                        newvalue - b_values[mb_inds],
+                    v_loss_unclipped = (newvalue - b_returns[mb_indxs]) ** 2
+                    v_clipped = b_values[mb_indxs] + torch.clamp(
+                        newvalue - b_values[mb_indxs],
                         -config.clip_coef,
                         config.clip_coef,
                     )
-                    v_loss_clipped = (v_clipped - b_returns[mb_inds]) ** 2
+                    v_loss_clipped = (v_clipped - b_returns[mb_indxs]) ** 2
                     v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
                     v_loss = 0.5 * v_loss_max.mean()
                 else:
-                    v_loss = 0.5 * ((newvalue - b_returns[mb_inds]) ** 2).mean()
+                    v_loss = 0.5 * ((newvalue - b_returns[mb_indxs]) ** 2).mean()
 
                 entropy_loss = entropy.mean()
                 loss = (
@@ -358,6 +340,7 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
     total_time = time.time() - start_time
     env.close()
 
+    del worker_batch
     for i in range(config.num_workers):
         input_queues[i].put(0)
 

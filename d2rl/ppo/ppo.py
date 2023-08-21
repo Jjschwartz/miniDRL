@@ -50,33 +50,33 @@ def run_rollout_worker(
     worker_model = config.load_model()
     worker_model.cpu()
 
-    device = config.device
+    # worker buffers are stored on CPU
     buf_shape = (config.num_rollout_steps, config.num_envs_per_worker)
-    obs = torch.zeros(buf_shape + obs_space.shape).to(device)
-    actions = torch.zeros(buf_shape + act_space.shape).to(device)
-    logprobs = torch.zeros(buf_shape).to(device)
-    rewards = torch.zeros(buf_shape).to(device)
+    obs = torch.zeros(buf_shape + obs_space.shape)
+    actions = torch.zeros(buf_shape + act_space.shape)
+    logprobs = torch.zeros(buf_shape)
+    rewards = torch.zeros(buf_shape)
     # +1 for bootstrapped value
-    dones = torch.zeros((buf_shape[0] + 1, buf_shape[1])).to(device)
-    values = torch.zeros((buf_shape[0] + 1, buf_shape[1])).to(device)
+    dones = torch.zeros((buf_shape[0] + 1, buf_shape[1]))
+    values = torch.zeros((buf_shape[0] + 1, buf_shape[1]))
     lstm_state_shape = (
         worker_model.lstm.num_layers,
         config.num_envs_per_worker,
         worker_model.lstm.hidden_size,
     )
     initial_lstm_states = (
-        torch.zeros((config.num_seqs_per_rollout,) + lstm_state_shape).to(device),
-        torch.zeros((config.num_seqs_per_rollout,) + lstm_state_shape).to(device),
+        torch.zeros((config.num_seqs_per_rollout,) + lstm_state_shape),
+        torch.zeros((config.num_seqs_per_rollout,) + lstm_state_shape),
     )
     ep_return_stats = torch.zeros(3)
     ep_len_stats = torch.zeros(3)
 
     # setup variables for tracking current step outputs
-    next_obs = torch.Tensor(envs.reset()[0]).cpu()
-    next_done = torch.zeros(config.num_envs_per_worker).cpu()
+    next_obs = torch.Tensor(envs.reset()[0])
+    next_done = torch.zeros(config.num_envs_per_worker)
     next_lstm_state = (
-        torch.zeros(lstm_state_shape).cpu(),
-        torch.zeros(lstm_state_shape).cpu(),
+        torch.zeros(lstm_state_shape),
+        torch.zeros(lstm_state_shape),
     )
 
     while True:
@@ -124,7 +124,7 @@ def run_rollout_worker(
             )
 
             done = terminated | truncated
-            rewards[step] = torch.tensor(reward).to(config.device).view(-1)
+            rewards[step] = torch.tensor(reward).view(-1)
             next_obs = torch.Tensor(next_obs)
             next_done = torch.Tensor(done)
 
@@ -162,7 +162,7 @@ def run_rollout_worker(
             values[-1] = next_value
 
         # calculate advantages and monte-carlo returns
-        advantages = torch.zeros_like(rewards).to(device)
+        advantages = torch.zeros_like(rewards)
         lastgaelam = 0
         for t in reversed(range(config.num_rollout_steps)):
             nextnonterminal = 1.0 - dones[t + 1]
@@ -289,9 +289,6 @@ def run_evaluation_worker(
             next_obs = torch.Tensor(next_obs).to(device)
             next_done = torch.Tensor(done).to(device)
             steps += 1
-
-            if steps % (config.eval_num_steps // 10) == 0:
-                print(f"Eval progress: {steps}/{config.eval_num_steps}")
 
             for item in [
                 i
