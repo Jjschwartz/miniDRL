@@ -13,14 +13,12 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
-from d2rl.ppo.network import PPONetwork
 from d2rl.ppo.utils import PPOConfig
 
 
 def run_rollout_worker(
     worker_id: int,
     config: PPOConfig,
-    learner_model: PPONetwork,
     input_queue: mp.Queue,
     output_queue: mp.Queue,
 ):
@@ -81,7 +79,8 @@ def run_rollout_worker(
 
     while True:
         # wait for learner to signal ready for next batch
-        if input_queue.get() == 0:
+        learner_model = input_queue.get()
+        if learner_model == 0:
             # learner has finished training, so end work
             break
 
@@ -210,13 +209,11 @@ def run_rollout_worker(
                 "ep_lens": ep_len_stats,
             }
         )
-
     envs.close()
 
 
 def run_evaluation_worker(
     config: PPOConfig,
-    learner_model: PPONetwork,
     input_queue: mp.Queue,
     output_queue: mp.Queue,
 ):
@@ -245,7 +242,8 @@ def run_evaluation_worker(
 
     while True:
         # wait for main process to signal ready for evaluation
-        if input_queue.get() == 0:
+        learner_model = input_queue.get()
+        if learner_model == 0:
             # main process has finished training, so end work
             break
 
@@ -401,7 +399,6 @@ def run_ppo(config: PPOConfig):
             args=(
                 worker_id,
                 config,
-                model,
                 input_queues[worker_id],
                 output_queues[worker_id],
             ),
@@ -417,7 +414,6 @@ def run_ppo(config: PPOConfig):
             target=run_evaluation_worker,
             args=(
                 config,
-                model,
                 eval_input_queue,
                 eval_output_queue,
             ),
@@ -469,7 +465,7 @@ def run_ppo(config: PPOConfig):
             assert eval_output_queue is not None
             print("Running evaluation...")
             eval_start_time = time.time()
-            eval_input_queue.put(1)
+            eval_input_queue.put(model)
             eval_results = eval_output_queue.get()
 
             print(
@@ -488,7 +484,7 @@ def run_ppo(config: PPOConfig):
         experience_collection_start_time = time.time()
         # signal workers to collect next batch of experience
         for i in range(config.num_workers):
-            input_queues[i].put(1)
+            input_queues[i].put(model)
 
         # wait for workers to finish collecting experience
         for i in range(config.num_workers):
@@ -725,21 +721,13 @@ def run_ppo(config: PPOConfig):
 
     print("Training complete")
     print("Sending stop signal to workers.")
-    del worker_batch
     for i in range(config.num_workers):
         input_queues[i].put(0)
 
     if eval_input_queue is not None:
         eval_input_queue.put(0)
 
-    print("Stop signal sent, joining workers.")
-    for i in range(config.num_workers):
-        workers[i].join()
-
-    if eval_worker is not None:
-        eval_worker.join()
-
-    print("Workers successfully joined. Cleaning up communication queues.")
+    print("Closing communication queues.")
     for i in range(config.num_workers):
         input_queues[i].close()
         output_queues[i].close()
@@ -749,4 +737,12 @@ def run_ppo(config: PPOConfig):
     if eval_output_queue is not None:
         eval_output_queue.close()
 
+    print("Stop signal sent, joining workers.")
+    for i in range(config.num_workers):
+        workers[i].join()
+
+    if eval_worker is not None:
+        eval_worker.join()
+
+    print("Workers successfully joined.")
     print("All done")

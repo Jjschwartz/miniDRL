@@ -42,6 +42,7 @@ For all options, run:
     python benchmarking.py --help
 
 """
+import gc
 import os
 import random
 import time
@@ -97,7 +98,7 @@ CARTPOLE_BATCH_SIZES = [2048, 4096, 8192, 16384, 32768, 65536, 131072]
 ATARI_BATCH_SIZES = [2048, 4096, 8192, 16384, 32768]
 
 # smaller exp
-# NUM_UPDATES = 5
+# NUM_UPDATES = 2
 # NUM_WORKERS = [1, 2, 4]
 # CARTPOLE_BATCH_SIZES = [2048, 4096]
 # ATARI_BATCH_SIZES = [8192, 16384]
@@ -173,7 +174,6 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
             args=(
                 worker_id,
                 config,
-                model,
                 input_queues[worker_id],
                 output_queues[worker_id],
             ),
@@ -187,7 +187,7 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
     # Initialize rollout workers by doing a single batch
     # This first batch is always much slower due to start up overhead
     for i in range(config.num_workers):
-        input_queues[i].put(1)
+        input_queues[i].put(model)
     for i in range(config.num_workers):
         output_queues[i].get()
 
@@ -204,7 +204,7 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
         experience_collection_start_time = time.time()
         # signal workers to collect next batch of experience
         for i in range(config.num_workers):
-            input_queues[i].put(1)
+            input_queues[i].put(model)
 
         # wait for workers to finish collecting experience
         for i in range(config.num_workers):
@@ -340,16 +340,15 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
     total_time = time.time() - start_time
     env.close()
 
-    del worker_batch
     for i in range(config.num_workers):
         input_queues[i].put(0)
 
     for i in range(config.num_workers):
-        workers[i].join()
-
-    for i in range(config.num_workers):
         input_queues[i].close()
         output_queues[i].close()
+
+    for i in range(config.num_workers):
+        workers[i].join()
 
     return {
         "total_steps": global_step,
@@ -433,6 +432,12 @@ def run(
                 + "\n"
             )
         exp_num += 1
+
+        # give time for CUDA cleanup so we don't get OOM errors
+        with torch.cuda.device(device):
+            torch.cuda.empty_cache()
+        gc.collect()
+        time.sleep(2)
 
     print("Benchmarking experiments finished")
 
