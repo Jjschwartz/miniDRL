@@ -56,7 +56,6 @@ def get_atari_env_creator_fn(
         env = gym.wrappers.ResizeObservation(env, (84, 84))
         env = gym.wrappers.GrayScaleObservation(env)
         env = gym.wrappers.FrameStack(env, 1)
-        env = gym.wrappers.NormalizeObservation(env)
 
         seed = config.seed + env_idx
         if worker_idx is not None:
