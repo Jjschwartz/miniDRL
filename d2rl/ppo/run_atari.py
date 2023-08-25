@@ -51,7 +51,7 @@ def get_atari_env_creator_fn(
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
         # env = ClipRewardEnv(env)
-        env = gym.wrappers.NormalizeReward()
+        env = gym.wrappers.NormalizeReward(env)
         env = ClipRewardRangeEnv(env, -5, 5)
         env = gym.wrappers.ResizeObservation(env, (84, 84))
         env = gym.wrappers.GrayScaleObservation(env)
