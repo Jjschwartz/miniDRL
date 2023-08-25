@@ -12,7 +12,7 @@ import torch.nn as nn
 from torch.distributions.categorical import Categorical
 
 from d2rl.common.atari_wrappers import (
-    ClipRewardEnv,
+    ClipRewardRangeEnv,
     EpisodicLifeEnv,
     FireResetEnv,
     MaxAndSkipEnv,
@@ -50,10 +50,13 @@ def get_atari_env_creator_fn(
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
-        env = ClipRewardEnv(env)
+        # env = ClipRewardEnv(env)
+        env = gym.wrappers.NormalizeReward()
+        env = ClipRewardRangeEnv(env, -5, 5)
         env = gym.wrappers.ResizeObservation(env, (84, 84))
         env = gym.wrappers.GrayScaleObservation(env)
         env = gym.wrappers.FrameStack(env, 1)
+        env = gym.wrappers.NormalizeObservation(env)
 
         seed = config.seed + env_idx
         if worker_idx is not None:
@@ -192,7 +195,7 @@ def parse_ppo_atari_args() -> PPOConfig:
         help="the number of mini-batches. Onle used if `--minibatch-size=-1`")
     parser.add_argument("--minibatch-size", type=int, default=2048,
         help="the number of mini-batches")
-    parser.add_argument("--seq-len", type=int, default=16,
+    parser.add_argument("--seq-len", type=int, default=8,
         help="the lengths of individual sequences used in training batches")
     
     # Loss and update hyperparameters
@@ -208,7 +211,7 @@ def parse_ppo_atari_args() -> PPOConfig:
         help="the lambda for the general advantage estimation")
     parser.add_argument("--norm-adv", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles advantages normalization")
-    parser.add_argument("--clip-coef", type=float, default=0.1,
+    parser.add_argument("--clip-coef", type=float, default=0.2,
         help="the surrogate clipping coefficient")
     parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
@@ -216,7 +219,7 @@ def parse_ppo_atari_args() -> PPOConfig:
         help="coefficient of the entropy")
     parser.add_argument("--vf-coef", type=float, default=0.5,
         help="coefficient of the value function")
-    parser.add_argument("--max-grad-norm", type=float, default=0.5,
+    parser.add_argument("--max-grad-norm", type=float, default=5.0,
         help="the maximum norm for the gradient clipping")
     parser.add_argument("--target-kl", type=float, default=None,
         help="the target KL divergence threshold")

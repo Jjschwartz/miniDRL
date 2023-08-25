@@ -178,8 +178,10 @@ class ClipRewardEnv(gym.RewardWrapper):
     :param env: Environment to wrap
     """
 
-    def __init__(self, env: gym.Env):
+    def __init__(self, env: gym.Env, reward_min: float = -1.0, reward_max: float = 1.0):
         super().__init__(env)
+        self.reward_min = reward_min
+        self.reward_max = reward_max
 
     def reward(self, reward: SupportsFloat) -> float:
         """
@@ -189,3 +191,27 @@ class ClipRewardEnv(gym.RewardWrapper):
         :return:
         """
         return np.sign(float(reward))
+
+
+class ClipRewardRangeEnv(gym.RewardWrapper):
+    """
+    Clip the reward to [reward_min, reward_max].
+
+    :param env: Environment to wrap
+    :param reward_min: Minimum reward value
+    :param reward_max: Maximum reward value
+    """
+
+    def __init__(self, env: gym.Env, reward_min: float = -1.0, reward_max: float = 1.0):
+        super().__init__(env)
+        self.reward_min = reward_min
+        self.reward_max = reward_max
+
+    def reward(self, reward: SupportsFloat) -> float:
+        """
+        Clip reward to [reward_min, reward_max].
+
+        :param reward:
+        :return:
+        """
+        return np.clip(reward, self.reward_min, self.reward_max)
