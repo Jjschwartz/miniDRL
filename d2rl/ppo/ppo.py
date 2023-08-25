@@ -79,13 +79,13 @@ def run_rollout_worker(
 
     while True:
         # wait for learner to signal ready for next batch
-        learner_model = input_queue.get()
-        if learner_model == 0:
+        learner_model_state = input_queue.get()
+        if learner_model_state == 0:
             # learner has finished training, so end work
             break
 
         # sync weights
-        worker_model.load_state_dict(learner_model.state_dict())
+        worker_model.load_state_dict(learner_model_state)
 
         # collect batch of experience
         episode_returns = []
@@ -242,14 +242,14 @@ def run_evaluation_worker(
 
     while True:
         # wait for main process to signal ready for evaluation
-        learner_model = input_queue.get()
-        if learner_model == 0:
+        learner_model_state = input_queue.get()
+        if learner_model_state == 0:
             # main process has finished training, so end work
             break
 
         start_time = time.time()
         # sync weights
-        eval_model.load_state_dict(learner_model.state_dict())
+        eval_model.load_state_dict(learner_model_state)
 
         # run evaluation episodes
         # reseting envs and all variables
@@ -376,9 +376,6 @@ def run_ppo(config: PPOConfig):
     ep_returns = torch.zeros((config.num_workers, 3)).cpu()
     ep_lens = torch.zeros((config.num_workers, 3)).cpu()
 
-    # load model and buffers into shared memory
-    model.share_memory()
-
     # Spawn workers
     # `fork` not supported by CUDA
     # https://pytorch.org/docs/main/notes/multiprocessing.html#cuda-in-multiprocessing
@@ -392,8 +389,8 @@ def run_ppo(config: PPOConfig):
     # placeholder for worker batch, so we can release it later
     worker_batch = {}
     for worker_id in range(config.num_workers):
-        input_queues.append(mp_ctxt.Queue())
-        output_queues.append(mp_ctxt.Queue())
+        input_queues.append(mp_ctxt.SimpleQueue())
+        output_queues.append(mp_ctxt.SimpleQueue())
         worker = mp_ctxt.Process(
             target=run_rollout_worker,
             args=(
@@ -408,8 +405,8 @@ def run_ppo(config: PPOConfig):
 
     # create eval worker
     if config.eval_interval > 0:
-        eval_input_queue = mp_ctxt.Queue()
-        eval_output_queue = mp_ctxt.Queue()
+        eval_input_queue = mp_ctxt.SimpleQueue()
+        eval_output_queue = mp_ctxt.SimpleQueue()
         eval_worker = mp_ctxt.Process(
             target=run_evaluation_worker,
             args=(
@@ -459,13 +456,16 @@ def run_ppo(config: PPOConfig):
             lrnow = frac * config.learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
 
+        # current model state to share with workers
+        model_state = {k: v.cpu() for k, v in model.state_dict().items()}
+
         # run evaluation
         if config.eval_interval > 0 and update % config.eval_interval == 0:
             assert eval_input_queue is not None
             assert eval_output_queue is not None
             print("Running evaluation...")
             eval_start_time = time.time()
-            eval_input_queue.put(model)
+            eval_input_queue.put(model_state)
             eval_results = eval_output_queue.get()
 
             print(
@@ -484,7 +484,7 @@ def run_ppo(config: PPOConfig):
         experience_collection_start_time = time.time()
         # signal workers to collect next batch of experience
         for i in range(config.num_workers):
-            input_queues[i].put(model)
+            input_queues[i].put(model_state)
 
         # wait for workers to finish collecting experience
         for i in range(config.num_workers):

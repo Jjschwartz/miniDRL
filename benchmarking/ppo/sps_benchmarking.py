@@ -99,9 +99,9 @@ ATARI_BATCH_SIZES = [2048, 4096, 8192, 16384, 32768]
 
 # smaller exp
 # NUM_UPDATES = 2
-# NUM_WORKERS = [1, 2, 4]
+# NUM_WORKERS = [2]
 # CARTPOLE_BATCH_SIZES = [2048, 4096]
-# ATARI_BATCH_SIZES = [8192, 16384]
+# ATARI_BATCH_SIZES = [16384, 32768, 32768, 32768]
 
 
 def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
@@ -151,9 +151,6 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
     ep_returns = torch.zeros((config.num_workers, 3)).cpu()
     ep_lens = torch.zeros((config.num_workers, 3)).cpu()
 
-    # load model and buffers into shared memory
-    model.share_memory()
-
     # Spawn workers
     # `fork` not supported by CUDA
     # https://pytorch.org/docs/main/notes/multiprocessing.html#cuda-in-multiprocessing
@@ -202,9 +199,12 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
     learning_time = 0
     for update in range(1, config.num_updates + 1):
         experience_collection_start_time = time.time()
+        # current model state to share with workers
+        model_state = {k: v.cpu() for k, v in model.state_dict().items()}
+
         # signal workers to collect next batch of experience
         for i in range(config.num_workers):
-            input_queues[i].put(model)
+            input_queues[i].put(model_state)
 
         # wait for workers to finish collecting experience
         for i in range(config.num_workers):
@@ -259,7 +259,6 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
         flat_indxs = np.arange(config.batch_size).reshape(
             config.seq_len, seqs_per_batch
         )
-        clipfracs = []
         approx_kl = 0
         for epoch in range(config.update_epochs):
             np.random.shuffle(seq_indxs)
@@ -285,11 +284,7 @@ def run_benchmarking_ppo(config: PPOConfig, no_learning: bool = False):
                 ratio = logratio.exp()
 
                 with torch.no_grad():
-                    # calculate approx_kl http://joschu.net/blog/kl-approx.html
                     approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [
-                        ((ratio - 1.0).abs() > config.clip_coef).float().mean().item()
-                    ]
 
                 mb_advantages = b_advantages[mb_indxs]
                 if config.norm_adv:
