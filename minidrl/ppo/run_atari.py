@@ -1,12 +1,11 @@
 """Run PPO on atari environments."""
-from __future__ import annotations
-
-import argparse
 import math
-from distutils.util import strtobool
+from dataclasses import dataclass, field
+from typing import Optional
 
 import gymnasium as gym
 import numpy as np
+import pyrallis
 import torch
 import torch.nn as nn
 from torch.distributions.categorical import Categorical
@@ -18,8 +17,98 @@ from minidrl.common.atari_wrappers import (
     MaxAndSkipEnv,
     NoopResetEnv,
 )
-from minidrl.ppo.ppo import run_ppo
-from minidrl.ppo.utils import PPOConfig
+from minidrl.ppo.ppo import PPOConfig, run_ppo
+
+
+@dataclass
+class AtariPPOConfig(PPOConfig):
+    """Configuration for Distributed PPO in Atari."""
+
+    # The name of this experiment
+    exp_name: str = "ppo_atari"
+    # The name of this run
+    run_name: str = field(init=False, default="<exp_name>_<env_id>_<seed>_<time>")
+    # Experiment seed
+    seed: int = 0
+    # Whether to set torch to deterministic mode
+    # `torch.backends.cudnn.deterministic=False`
+    torch_deterministic: bool = True
+    # Whether to use CUDA
+    cuda: bool = True
+    # Number of updates between saving the policy model. If `save_interval > 0`, then
+    # the policy model will be saved every `save_interval` updates as well as after the
+    # final update.
+    save_interval: int = 0
+
+    # Wether to track the experiment with WandB
+    track_wandb: bool = False
+    # WandB project name
+    wandb_project: str = "miniDRL"
+    # WandB entity (team) name
+    wandb_entity: Optional[str] = None
+
+    # The ID of the atari environment
+    env_id: str = "PongNoFrameskip-v4"
+    # Whether to capture videos of the agent performances (check out `videos` folder)
+    capture_video: bool = False
+
+    # Total number of timesteps to train for
+    total_timesteps: int = 200000000
+    # Number of steps of the each vectorized environment per update
+    num_rollout_steps: int = 128
+    # The lengths of individual sequences (chunks) used in training batches. This
+    # controls the length of Backpropagation Through Time (BPTT) in the LSTM. Should
+    # be a factor of `num_rollout_steps`.
+    seq_len: int = 16
+    # Number of parallel rollout workers to use for collecting trajectories
+    num_workers: int = 4
+    # Number of parallel environments per worker.
+    # Will be overwritten if `batch_size` is provided
+    num_envs_per_worker: int = 32
+    # Number of steps per update batch
+    # If not provided (i.e. is set to -1), then
+    # `batch_size = num_rollout_steps * num_envs_per_worker * num_workers`
+    batch_size: int = 16384
+    # Number of mini-batches per update
+    # Will be overwritten if minibatch_size is provided
+    num_minibatches: int = 8
+    # Number of steps in each mini-batch.
+    # If not provided (i.e. is set to -1), then
+    # `minibatch_size = int(batch_size // num_minibatches)`
+    minibatch_size: int = 2048
+
+    # Number of epochs to train policy per update
+    update_epochs: int = 2
+    # Learning rate of the optimizer
+    learning_rate: float = 2.5e-4
+    # Whether to anneal the learning rate linearly to zero
+    anneal_lr: bool = True
+    # The discount factor
+    gamma: float = 0.999
+    # The GAE lambda parameter
+    gae_lambda: float = 0.95
+    # Whether to normalize advantages
+    norm_adv: bool = True
+    # Surrogate clip coefficient of PPO
+    clip_coef: float = 0.2
+    # Whether to use a clipped loss for the value function, as per the paper
+    clip_vloss: bool = True
+    # Coefficient of the value function loss
+    vf_coef: float = 0.5
+    # Coefficient of the entropy
+    ent_coef: float = 0.01
+    # The maximum norm for the gradient clipping
+    max_grad_norm: float = 5.0
+    # The target KL divergence threshold
+    target_kl: Optional[float] = None
+
+    # Function that returns an environment creator function
+    # Callable[[PPOConfig, int, int | None], Callable[[], gym.Env]
+    # Should be set after initialization
+    env_creator_fn_getter: callable = field(init=False, default=None)
+    # Function for loading model: Callable[[PPOConfig], nn.Module]
+    # Should be set after initialization
+    model_loader: callable = field(init=False, default=None)
 
 
 def quadratic_episode_trigger(x: int) -> bool:
@@ -29,7 +118,7 @@ def quadratic_episode_trigger(x: int) -> bool:
 
 
 def get_atari_env_creator_fn(
-    config: PPOConfig, env_idx: int, worker_idx: int | None = None
+    config: PPOConfig, env_idx: int, worker_idx: Optional[int] = None
 ):
     """Get atari environment creator function."""
 
@@ -80,9 +169,14 @@ class PPOAtariNetwork(nn.Module):
     """CNN based network for PPO on atari.
 
     https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo_atari_lstm.py
+
+    Has a CNN trunk which feeds into a linear layer before going an LSTM layer. The
+    output of the LSTM layer is split into two heads, one for the actor (policy) and
+    one for the (critic) value function.
+
     """
 
-    def __init__(self, obs_space: gym.spaces.Space, act_space: gym.spaces.Discrete):
+    def __init__(self, act_space: gym.spaces.Discrete):
         super().__init__()
         self.network = nn.Sequential(
             layer_init(nn.Conv2d(1, 32, 8, stride=4)),
@@ -146,101 +240,13 @@ class PPOAtariNetwork(nn.Module):
 def atari_model_loader(config: PPOConfig):
     """Generates model given config."""
     env = config.env_creator_fn_getter(config, env_idx=0, worker_idx=None)()
-    model = PPOAtariNetwork(env.observation_space, env.action_space)
+    model = PPOAtariNetwork(env.action_space)
     env.close()
     return model
 
 
-def parse_ppo_atari_args() -> PPOConfig:
-    """Parse command line arguments for PPO algorithm."""
-    # ruff: noqa: E501
-    # fmt: off
-    parser = argparse.ArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument("--exp-name", type=str, default="ppo_atari",
-        help="the name of this experiment")
-    parser.add_argument("--seed", type=int, default=0,
-        help="seed of the experiment")
-    parser.add_argument("--torch-deterministic", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
-        help="if toggled, `torch.backends.cudnn.deterministic=False`")
-    parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
-        help="if toggled, cuda will be enabled by default")
-    parser.add_argument("--track-wandb", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
-        help="if toggled, this experiment will be tracked with Weights and Biases")
-    parser.add_argument("--wandb-project", type=str, default="miniDRL",
-        help="the wandb's project name")
-    parser.add_argument("--wandb-entity", type=str, default=None,
-        help="the entity (team) of wandb's project")
-    
-    # Environment specific arguments
-    parser.add_argument("--env-id", type=str, default="PongNoFrameskip-v4",
-        help="the id of the environment")
-    parser.add_argument("--capture-video", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
-        help="whether to capture videos of the agent performances (check out `videos` folder)")
-
-    # Training arguments
-    parser.add_argument("--total-timesteps", type=int, default=200000000,
-        help="total timesteps of the experiments")
-    parser.add_argument("--num-rollout-steps", type=int, default=128,
-        help="the number of steps to run in each environment per policy rollout")
-    parser.add_argument("--num-workers", type=int, default=4,
-        help="the number of rollout workers collecting trajectories in parallel")
-    parser.add_argument("--num-envs-per-worker", type=int, default=32,
-        help="the number of parallel game environments, will be set automatically unless `--batch_size=-1`.")
-    parser.add_argument("--batch-size", type=int, default=16384,
-        help="the number of steps in each batch.")
-    parser.add_argument("--num-minibatches", type=int, default=4,
-        help="the number of mini-batches. Onle used if `--minibatch-size=-1`")
-    parser.add_argument("--minibatch-size", type=int, default=2048,
-        help="the number of mini-batches")
-    parser.add_argument("--seq-len", type=int, default=8,
-        help="the lengths of individual sequences used in training batches")
-    
-    # Loss and update hyperparameters
-    parser.add_argument("--update-epochs", type=int, default=2,
-        help="the K epochs to update the policy")
-    parser.add_argument("--learning-rate", type=float, default=2.5e-4,
-        help="the learning rate of the optimizer")
-    parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
-        help="Toggle learning rate annealing for policy and value networks")
-    parser.add_argument("--gamma", type=float, default=0.999,
-        help="the discount factor gamma")
-    parser.add_argument("--gae-lambda", type=float, default=0.95,
-        help="the lambda for the general advantage estimation")
-    parser.add_argument("--norm-adv", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
-        help="Toggles advantages normalization")
-    parser.add_argument("--clip-coef", type=float, default=0.2,
-        help="the surrogate clipping coefficient")
-    parser.add_argument("--clip-vloss", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
-        help="Toggles whether or not to use a clipped loss for the value function, as per the paper.")
-    parser.add_argument("--ent-coef", type=float, default=0.01,
-        help="coefficient of the entropy")
-    parser.add_argument("--vf-coef", type=float, default=0.5,
-        help="coefficient of the value function")
-    parser.add_argument("--max-grad-norm", type=float, default=5.0,
-        help="the maximum norm for the gradient clipping")
-    parser.add_argument("--target-kl", type=float, default=None,
-        help="the target KL divergence threshold")
-    
-    # Evaluation specific arguments
-    parser.add_argument("--eval-interval", type=int, default=100,
-        help="evaluation interval w.r.t updates. If eval-interval <= 0, no evaluation.")
-    parser.add_argument("--eval-num-steps", type=int, default=10000,
-        help="minimum number of steps per evaluation (per eval environment = num-envs-per-worker)")
-    
-    # Other arguments
-    parser.add_argument("--save-interval", type=int, default=0,
-        help="checkpoint saving interval, w.r.t. updates. If save-interval <= 0, no saving.")
-    
-
-    args = parser.parse_args()
-    # fmt: on
-    config = PPOConfig(**vars(args))
-    config.env_creator_fn_getter = get_atari_env_creator_fn
-    config.model_loader = atari_model_loader
-    return config
-
-
 if __name__ == "__main__":
-    run_ppo(parse_ppo_atari_args())
+    cfg = pyrallis.parse(config_class=AtariPPOConfig)
+    cfg.env_creator_fn_getter = get_atari_env_creator_fn
+    cfg.model_loader = atari_model_loader
+    run_ppo(cfg)

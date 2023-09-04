@@ -1,9 +1,11 @@
 """PPO with multiple rollout workers collecting trajectories in parallel."""
+import logging
 import os
 import random
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from datetime import timedelta
+from typing import Optional
 
 import gymnasium as gym
 import numpy as np
@@ -13,7 +15,172 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
-from minidrl.ppo.utils import PPOConfig
+from minidrl.config import BASE_RESULTS_DIR
+
+
+@dataclass
+class PPOConfig:
+    """Configuration for Distributed PPO."""
+
+    # The name of this experiment
+    exp_name: str = "ppo"
+    # The name of this run
+    run_name: str = field(init=False, default="<exp_name>_<env_id>_<seed>_<time>")
+    # Experiment seed
+    seed: int = 0
+    # Whether to set torch to deterministic mode
+    # `torch.backends.cudnn.deterministic=False`
+    torch_deterministic: bool = True
+    # Whether to use CUDA
+    cuda: bool = True
+    # Number of updates between saving the policy model. If `save_interval > 0`, then
+    # the policy model will be saved every `save_interval` updates as well as after the
+    # final update.
+    save_interval: int = 0
+
+    # Wether to track the experiment with WandB
+    track_wandb: bool = False
+    # WandB project name
+    wandb_project: str = "miniDRL"
+    # WandB entity (team) name
+    wandb_entity: Optional[str] = None
+
+    # The ID of the gymnasium environment
+    env_id: str = "CartPole-v1"
+    # Whether to capture videos of the agent performances (check out `videos` folder)
+    capture_video: bool = False
+
+    # Total number of timesteps to train for
+    total_timesteps: int = 10000000
+    # Number of steps of the each vectorized environment per update
+    num_rollout_steps: int = 128
+    # The lengths of individual sequences (chunks) used in training batches. This
+    # controls the length of Backpropagation Through Time (BPTT) in the LSTM. Should
+    # be a factor of `num_rollout_steps`.
+    seq_len: int = 16
+    # Number of parallel rollout workers to use for collecting trajectories
+    num_workers: int = 4
+    # Number of parallel environments per worker.
+    # Will be overwritten if `batch_size` is provided
+    num_envs_per_worker: int = 4
+    # Number of steps per update batch
+    # If not provided (i.e. is set to -1), then
+    # `batch_size = num_rollout_steps * num_envs_per_worker * num_workers`
+    batch_size: int = -1
+    # Number of mini-batches per update
+    # Will be overwritten if minibatch_size is provided
+    num_minibatches: int = 4
+    # Number of steps in each mini-batch.
+    # If not provided (i.e. is set to -1), then
+    # `minibatch_size = int(batch_size // num_minibatches)`
+    minibatch_size: int = -1
+
+    # Number of epochs to train policy per update
+    update_epochs: int = 2
+    # Learning rate of the optimizer
+    learning_rate: float = 2.5e-4
+    # Whether to anneal the learning rate linearly to zero
+    anneal_lr: bool = True
+    # The discount factor
+    gamma: float = 0.99
+    # The GAE lambda parameter
+    gae_lambda: float = 0.95
+    # Whether to normalize advantages
+    norm_adv: bool = True
+    # Surrogate clip coefficient of PPO
+    clip_coef: float = 0.2
+    # Whether to use a clipped loss for the value function, as per the paper
+    clip_vloss: bool = True
+    # Coefficient of the value function loss
+    vf_coef: float = 0.5
+    # Coefficient of the entropy
+    ent_coef: float = 0.01
+    # The maximum norm for the gradient clipping
+    max_grad_norm: float = 0.5
+    # The target KL divergence threshold
+    target_kl: Optional[float] = None
+
+    # Function that returns an environment creator function
+    # Callable[[PPOConfig, int, int | None], Callable[[], gym.Env]
+    # Should be set after initialization
+    env_creator_fn_getter: callable = field(init=False, default=None)
+    # Function for loading model: Callable[[PPOConfig], nn.Module]
+    # Should be set after initialization
+    model_loader: callable = field(init=False, default=None)
+
+    def __post_init__(self):
+        """Post initialization."""
+        self.run_name = self.exp_name
+        if self.env_id not in self.exp_name:
+            self.run_name += f"_{self.env_id}"
+        self.run_name += f"_{self.seed}_{int(time.time())}"
+
+        assert self.num_rollout_steps % self.seq_len == 0
+
+        if self.batch_size == -1:
+            self.batch_size = (
+                self.num_rollout_steps * self.num_envs_per_worker * self.num_workers
+            )
+        else:
+            assert self.batch_size % self.num_rollout_steps == 0
+            assert (self.batch_size // self.num_rollout_steps) % self.num_workers == 0
+            self.num_envs_per_worker = (
+                self.batch_size // self.num_rollout_steps
+            ) // self.num_workers
+
+        if self.minibatch_size == -1:
+            assert self.batch_size % self.num_minibatches == 0
+            self.minibatch_size = self.batch_size // self.num_minibatches
+        else:
+            assert self.batch_size % self.minibatch_size == 0
+            self.num_minibatches = self.batch_size // self.minibatch_size
+
+        if self.num_seqs_per_batch % self.num_minibatches != 0:
+            logging.warn(
+                "Batch size w.r.t number of sequences/chunks `%d` isn't a multiple of "
+                "the number of minibatches `%d`. PPO will still run, but there will be "
+                "one smaller minibatch each epoch. "
+                "Consider using a different `minibatch_size`, `num_minibatches`,"
+                " `num_workers`, or `num_envs_per_worker`. for maximum efficiency.",
+                self.num_seqs_per_batch,
+                self.num_minibatches,
+            )
+
+    @property
+    def log_dir(self) -> str:
+        """Directory where the model and logs will be saved."""
+        return os.path.join(BASE_RESULTS_DIR, self.run_name)
+
+    @property
+    def video_dir(self) -> str:
+        """Directory where videos will be saved."""
+        return os.path.join(self.log_dir, "videos")
+
+    @property
+    def device(self) -> torch.device:
+        """Device where learner model is run."""
+        return torch.device(
+            "cuda" if torch.cuda.is_available() and self.cuda else "cpu"
+        )
+
+    @property
+    def num_seqs_per_rollout(self) -> int:
+        """The number of chunk sequences per individial environment rollout."""
+        return self.num_rollout_steps // self.seq_len
+
+    @property
+    def num_seqs_per_batch(self) -> int:
+        """Number of sequences/chunks per batch."""
+        return (self.num_envs_per_worker * self.num_workers) * self.num_seqs_per_rollout
+
+    @property
+    def num_updates(self) -> int:
+        """Total number of updates."""
+        return self.total_timesteps // self.batch_size
+
+    def load_model(self):
+        """Load the model."""
+        return self.model_loader(self)
 
 
 def run_rollout_worker(
@@ -212,112 +379,6 @@ def run_rollout_worker(
     envs.close()
 
 
-def run_evaluation_worker(
-    config: PPOConfig,
-    input_queue: mp.Queue,
-    output_queue: mp.Queue,
-):
-    """Worker function for running evaluations.
-
-    The evaluation worker uses the current learner model to run a number of evaluation
-    episodes, then reports the results back to the main process.
-
-    In addition, will record videos of the evaluation episodes if requested.
-
-    """
-    torch.set_num_threads(1)
-
-    # env setup
-    envs = gym.vector.SyncVectorEnv(
-        [
-            config.env_creator_fn_getter(config, env_idx=i, worker_idx=None)
-            for i in range(config.num_envs_per_worker)
-        ]
-    )
-
-    # model setup
-    device = config.device
-    eval_model = config.load_model()
-    eval_model.to(device)
-
-    while True:
-        # wait for main process to signal ready for evaluation
-        learner_model_state = input_queue.get()
-        if learner_model_state == 0:
-            # main process has finished training, so end work
-            break
-
-        start_time = time.time()
-        # sync weights
-        eval_model.load_state_dict(learner_model_state)
-
-        # run evaluation episodes
-        # reseting envs and all variables
-        next_obs = torch.Tensor(envs.reset()[0]).to(device)
-        next_done = torch.zeros(config.num_envs_per_worker).to(device)
-        next_lstm_state = (
-            torch.zeros(
-                eval_model.lstm.num_layers,
-                config.num_envs_per_worker,
-                eval_model.lstm.hidden_size,
-            ).to(device),
-            torch.zeros(
-                eval_model.lstm.num_layers,
-                config.num_envs_per_worker,
-                eval_model.lstm.hidden_size,
-            ).to(device),
-        )
-        start_time = time.time()
-        num_episodes = 0
-        episode_returns = []
-        episode_lengths = []
-
-        steps = 0
-        while num_episodes == 0 or steps < config.eval_num_steps:
-            # sample next action
-            with torch.no_grad():
-                action, _, _, _, next_lstm_state = eval_model.get_action_and_value(
-                    next_obs, next_lstm_state, next_done
-                )
-
-            # execute step and log data.
-            next_obs, _, terminated, truncated, info = envs.step(action.cpu().numpy())
-
-            done = terminated | truncated
-            next_obs = torch.Tensor(next_obs).to(device)
-            next_done = torch.Tensor(done).to(device)
-            steps += 1
-
-            for item in [
-                i
-                for i in info.get("final_info", [])
-                if i is not None and "episode" in i
-            ]:
-                num_episodes += 1
-                episode_returns.append(item["episode"]["r"][0])
-                episode_lengths.append(item["episode"]["l"][0])
-
-        eval_time = time.time() - start_time
-        total_steps = steps * config.num_envs_per_worker
-        output_queue.put(
-            {
-                "total_steps": total_steps,
-                "parallel_steps": steps,
-                "SPS": int(total_steps / eval_time),
-                "num_episodes": num_episodes,
-                "episode_return_mean": np.mean(episode_returns),
-                "episode_return_min": np.min(episode_returns),
-                "episode_return_max": np.max(episode_returns),
-                "episode_length_mean": np.mean(episode_lengths),
-                "episode_length_min": np.min(episode_lengths),
-                "episode_length_max": np.max(episode_lengths),
-                "time": eval_time,
-            }
-        )
-
-    envs.close()
-
-
 def run_ppo(config: PPOConfig):
     # seeding
     random.seed(config.seed)
@@ -342,18 +403,7 @@ def run_ppo(config: PPOConfig):
     model.to(device)
 
     # Experience buffer setup
-    seq_len, num_seqs_per_rollout = config.seq_len, config.num_seqs_per_rollout
-    seqs_per_batch = config.total_num_envs * num_seqs_per_rollout
-
-    print(f"Rollout Length per worker: {config.num_rollout_steps}")
-    print(f"Sequence Length: {seq_len}")
-    print(f"Number of Sequences per Rollout: {num_seqs_per_rollout}")
-    print(f"Num Envs per Worker: {config.num_envs_per_worker}")
-    print(f"Num Workers: {config.num_workers}")
-    print(f"Num sequences per batch: {seqs_per_batch}")
-    print(f"Batch size: {config.batch_size}")
-
-    buf_shape = (seq_len, seqs_per_batch)
+    buf_shape = (config.seq_len, config.num_seqs_per_batch)
     obs = torch.zeros(buf_shape + obs_space.shape).to(device)
     actions = torch.zeros(buf_shape + act_space.shape).to(device)
     logprobs = torch.zeros(buf_shape).to(device)
@@ -364,12 +414,12 @@ def run_ppo(config: PPOConfig):
     values = torch.zeros(buf_shape).to(device)
     # buffer for storing lstm state for each worker-env at start of each update
     initial_lstm_state = (
-        torch.zeros(model.lstm.num_layers, seqs_per_batch, model.lstm.hidden_size).to(
-            device
-        ),
-        torch.zeros(model.lstm.num_layers, seqs_per_batch, model.lstm.hidden_size).to(
-            device
-        ),
+        torch.zeros(
+            model.lstm.num_layers, config.num_seqs_per_batch, model.lstm.hidden_size
+        ).to(device),
+        torch.zeros(
+            model.lstm.num_layers, config.num_seqs_per_batch, model.lstm.hidden_size
+        ).to(device),
     )
 
     # buffers for tracking episode stats (mean, min, max)
@@ -402,24 +452,6 @@ def run_ppo(config: PPOConfig):
         )
         worker.start()
         workers.append(worker)
-
-    # create eval worker
-    if config.eval_interval > 0:
-        eval_input_queue = mp_ctxt.SimpleQueue()
-        eval_output_queue = mp_ctxt.SimpleQueue()
-        eval_worker = mp_ctxt.Process(
-            target=run_evaluation_worker,
-            args=(
-                config,
-                eval_input_queue,
-                eval_output_queue,
-            ),
-        )
-        eval_worker.start()
-    else:
-        eval_input_queue = None
-        eval_output_queue = None
-        eval_worker = None
 
     # Logging setup
     # Do this after workers are spawned to avoid log duplication
@@ -458,28 +490,6 @@ def run_ppo(config: PPOConfig):
 
         # current model state to share with workers
         model_state = {k: v.cpu() for k, v in model.state_dict().items()}
-
-        # run evaluation
-        if config.eval_interval > 0 and update % config.eval_interval == 0:
-            assert eval_input_queue is not None
-            assert eval_output_queue is not None
-            print("Running evaluation...")
-            eval_start_time = time.time()
-            eval_input_queue.put(model_state)
-            eval_results = eval_output_queue.get()
-
-            print(
-                f"global_step={global_step}, "
-                f"evaluation/episode_return={eval_results['episode_return_mean']:.2f}, "
-                f"evaluation/episode_length={eval_results['episode_length_mean']:.2f}, "
-                f"evaluation/SPS={eval_results['SPS']:.2f}, "
-                f"evaluation/time={eval_results['time']:.2f}"
-            )
-            for key, value in eval_results.items():
-                writer.add_scalar(f"evaluation/{key}", value, global_step)
-            # remove evaluation time from sps timer
-            # otherwise results will be skewed by evaluation time
-            sps_start_time += time.time() - eval_start_time
 
         experience_collection_start_time = time.time()
         # signal workers to collect next batch of experience
@@ -567,10 +577,9 @@ def run_ppo(config: PPOConfig):
         b_values = values.reshape(-1)
 
         # Optimizing the policy and value network
-        seqs_per_minibatch = seqs_per_batch // config.num_minibatches
-        seq_indxs = np.arange(seqs_per_batch)
+        seq_indxs = np.arange(config.num_seqs_per_batch)
         flat_indxs = np.arange(config.batch_size).reshape(
-            config.seq_len, seqs_per_batch
+            config.seq_len, config.num_seqs_per_batch
         )
         clipfracs = []
         approx_kl, old_approx_kl, unclipped_grad_norm = 0, 0, 0
@@ -580,8 +589,12 @@ def run_ppo(config: PPOConfig):
 
             # do minibatch update
             # each minibatch uses data from randomized subset of envs
-            for start in range(0, seqs_per_batch, seqs_per_minibatch):
-                end = start + seqs_per_minibatch
+            for start in range(
+                0,
+                config.num_seqs_per_batch,
+                config.num_seqs_per_batch // config.num_minibatches,
+            ):
+                end = start + (config.num_seqs_per_batch // config.num_minibatches)
                 mb_seq_indxs = seq_indxs[start:end]
                 # be really careful about the index
                 mb_indxs = flat_indxs[:, mb_seq_indxs].ravel()
@@ -724,25 +737,14 @@ def run_ppo(config: PPOConfig):
     for i in range(config.num_workers):
         input_queues[i].put(0)
 
-    if eval_input_queue is not None:
-        eval_input_queue.put(0)
-
     print("Closing communication queues.")
     for i in range(config.num_workers):
         input_queues[i].close()
         output_queues[i].close()
 
-    if eval_input_queue is not None:
-        eval_input_queue.close()
-    if eval_output_queue is not None:
-        eval_output_queue.close()
-
     print("Stop signal sent, joining workers.")
     for i in range(config.num_workers):
         workers[i].join()
-
-    if eval_worker is not None:
-        eval_worker.join()
 
     print("Workers successfully joined.")
     print("All done")

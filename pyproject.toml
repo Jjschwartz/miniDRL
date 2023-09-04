@@ -31,6 +31,7 @@ dependencies = [
   "torch >=2.0.0",
   "wandb >=0.15",
   "tensorboard >=2.13.0",
+  "pyrallis >=0.3.0",
 ]
 dynamic = ["version"]
 
