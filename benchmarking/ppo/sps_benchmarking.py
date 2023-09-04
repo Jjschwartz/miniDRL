@@ -57,9 +57,8 @@ import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.optim as optim
 
-from minidrl.ppo.ppo import run_rollout_worker
-from minidrl.ppo.utils import PPOConfig
-from minidrl.ppo.run_atari import get_atari_env_creator_fn, atari_model_loader
+from minidrl.ppo.ppo import PPOConfig, run_rollout_worker
+from minidrl.ppo.run_atari import atari_model_loader, get_atari_env_creator_fn
 
 CARTPOLE_CONFIG = {
     "exp_name": "ppo_benchmarking",
@@ -491,47 +490,50 @@ def plot(save_file: str):
     fig.tight_layout(rect=(0, 0, 0.8, 1))
 
     # here we do the same but inverted batch size by worker count
-    fig, axs = plt.subplots(
-        nrows=len(y_keys),
-        ncols=1,
-        squeeze=True,
-        sharex=True,
-        sharey=False,
-    )
-
     df.sort_values(by=["num_workers"], inplace=True, ascending=True)
-    for row, (y, yerr) in enumerate(y_keys):
-        ax = axs[row]
-        for batch_size in batch_sizes:
-            df_subset = df[(df["batch_size"] == batch_size)]
-            if yerr:
-                ax.errorbar(
-                    x=df_subset["num_workers"],
-                    y=df_subset[y],
-                    yerr=df_subset[yerr],
-                    label=f"{batch_size}",
-                )
-            else:
-                ax.plot(
-                    df_subset["num_workers"],
-                    df_subset[y],
-                    label=f"{batch_size}",
-                )
+    df_fixed_batch_size = df[(df["batch_size"] == 16384)]
+    for df_i in [df, df_fixed_batch_size]:
+        fig, axs = plt.subplots(
+            nrows=len(y_keys),
+            ncols=1,
+            squeeze=True,
+            sharex=True,
+            sharey=False,
+        )
 
-        # ax.set_yscale("log", base=2)
-        ax.set_ylabel(f"{y}")
-        if row == len(y_keys) - 1:
-            ax.set_xlabel("Num Workers")
+        for row, (y, yerr) in enumerate(y_keys):
+            ax = axs[row]
+            for batch_size in batch_sizes:
+                df_subset = df_i[(df_i["batch_size"] == batch_size)]
+                if yerr:
+                    ax.errorbar(
+                        x=df_subset["num_workers"],
+                        y=df_subset[y],
+                        yerr=df_subset[yerr],
+                        label=f"{batch_size}",
+                    )
+                else:
+                    ax.plot(
+                        df_subset["num_workers"],
+                        df_subset[y],
+                        label=f"{batch_size}",
+                    )
 
-    handles, labels = axs[0].get_legend_handles_labels()
-    fig.legend(
-        handles,
-        labels,
-        loc="center right",
-        ncol=1,
-        title="Batch Size",
-    )
-    fig.tight_layout(rect=(0, 0, 0.8, 1))
+            # ax.set_yscale("log", base=2)
+            ax.set_ylabel(f"{y}")
+            if row == len(y_keys) - 1:
+                ax.set_xlabel("Num Workers")
+
+        handles, labels = axs[0].get_legend_handles_labels()
+        if len(df_i["batch_size"].unique()) > 1:
+            fig.legend(
+                handles,
+                labels,
+                loc="center right",
+                ncol=1,
+                title="Batch Size",
+            )
+        fig.tight_layout(rect=(0, 0, 0.8, 1))
 
     # Next we plot SPS versus num_envs_per_worker by worker count
     fig, axs = plt.subplots(
