@@ -10,7 +10,7 @@ import torch.multiprocessing as mp
 if TYPE_CHECKING:
     from gymnasium import spaces
 
-    from d2rl.r2d2.utils import R2D2Config
+    from minidrl.r2d2.utils import R2D2Config
 
 
 class SumTree:

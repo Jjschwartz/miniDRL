@@ -10,8 +10,8 @@ from distutils.util import strtobool
 import gymnasium as gym
 import torch
 
-from d2rl.config import BASE_RESULTS_DIR
-from d2rl.r2d2.network import R2D2Network
+from minidrl.config import BASE_RESULTS_DIR
+from minidrl.r2d2.network import R2D2Network
 
 
 def get_env_creator_fn(config: R2D2Config, env_idx: int, actor_idx: int | None = None):
@@ -79,7 +79,7 @@ class R2D2Config:
     # WandB conbfiguration
     # --------------------
     track_wandb: bool = False
-    wandb_project: str = "d2rl"
+    wandb_project: str = "miniDRL"
     wandb_entity: str | None = None
 
     # Environment configuration

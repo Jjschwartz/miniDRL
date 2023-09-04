@@ -3,8 +3,8 @@
 import gymnasium as gym
 import torch
 
-from d2rl.r2d2.r2d2 import compute_loss_and_priority
-from d2rl.r2d2.utils import R2D2Config
+from minidrl.r2d2.r2d2 import compute_loss_and_priority
+from minidrl.r2d2.utils import R2D2Config
 
 
 def test_compute_loss_and_priorities():

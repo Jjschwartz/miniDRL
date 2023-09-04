@@ -11,15 +11,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from d2rl.common.atari_wrappers import (
+from minidrl.common.atari_wrappers import (
     ClipRewardEnv,
     EpisodicLifeEnv,
     FireResetEnv,
     MaxAndSkipEnv,
     NoopResetEnv,
 )
-from d2rl.r2d2.r2d2 import run_r2d2
-from d2rl.r2d2.utils import R2D2Config
+from minidrl.r2d2.r2d2 import run_r2d2
+from minidrl.r2d2.utils import R2D2Config
 
 
 def quadratic_episode_trigger(x: int) -> bool:

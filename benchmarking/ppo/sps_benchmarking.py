@@ -57,9 +57,9 @@ import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.optim as optim
 
-from d2rl.ppo.ppo import run_rollout_worker
-from d2rl.ppo.utils import PPOConfig
-from d2rl.ppo.run_atari import get_atari_env_creator_fn, atari_model_loader
+from minidrl.ppo.ppo import run_rollout_worker
+from minidrl.ppo.utils import PPOConfig
+from minidrl.ppo.run_atari import get_atari_env_creator_fn, atari_model_loader
 
 CARTPOLE_CONFIG = {
     "exp_name": "ppo_benchmarking",

@@ -32,11 +32,11 @@ import torch.multiprocessing as mp
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
-from d2rl.r2d2.replay import R2D2ActorReplayBuffer, R2D2PrioritizedReplay
+from minidrl.r2d2.replay import R2D2ActorReplayBuffer, R2D2PrioritizedReplay
 
 if TYPE_CHECKING:
-    from d2rl.r2d2.network import R2D2Network
-    from d2rl.r2d2.utils import R2D2Config
+    from minidrl.r2d2.network import R2D2Network
+    from minidrl.r2d2.utils import R2D2Config
 
 
 def compute_loss_and_priority(

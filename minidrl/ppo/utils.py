@@ -11,8 +11,8 @@ from distutils.util import strtobool
 import gymnasium as gym
 import torch
 
-from d2rl.config import BASE_RESULTS_DIR
-from d2rl.ppo.network import PPONetwork
+from minidrl.config import BASE_RESULTS_DIR
+from minidrl.ppo.network import PPONetwork
 
 
 def get_env_creator_fn(
@@ -249,7 +249,7 @@ def parse_ppo_args() -> PPOConfig:
         help="if toggled, cuda will be enabled by default")
     parser.add_argument("--track-wandb", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="if toggled, this experiment will be tracked with Weights and Biases")
-    parser.add_argument("--wandb-project", type=str, default="d2rl",
+    parser.add_argument("--wandb-project", type=str, default="miniDRL",
         help="the wandb's project name")
     parser.add_argument("--wandb-entity", type=str, default=None,
         help="the entity (team) of wandb's project")

@@ -3,8 +3,8 @@ import os
 
 import torch
 
-from d2rl.r2d2.r2d2 import run_r2d2
-from d2rl.r2d2.utils import R2D2Config
+from minidrl.r2d2.r2d2 import run_r2d2
+from minidrl.r2d2.utils import R2D2Config
 
 
 def test_run_r2d2_single_actor():

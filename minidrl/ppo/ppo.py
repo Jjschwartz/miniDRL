@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
-from d2rl.ppo.utils import PPOConfig
+from minidrl.ppo.utils import PPOConfig
 
 
 def run_rollout_worker(

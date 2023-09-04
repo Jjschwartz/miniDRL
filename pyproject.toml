@@ -5,27 +5,29 @@ requires = ["setuptools >= 61.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "d2rl"
-description = "Simple implementations of distributed, recurrent neural network (RNN) based deep reinforcement learning algorithms."
-authors = [{ name = "Jonathon Schwartz", email = "jonathon.schwartz@anu.edu.au" }]
+name = "minidrl"
+description = "Minimal, high-quality implementations of distributed, Deep Reinforcement Learning algorithms."
+authors = [
+  { name = "Jonathon Schwartz", email = "jonathon.schwartz@anu.edu.au" },
+]
 license = { text = "MIT License" }
 readme = "README.md"
 requires-python = ">= 3.9"
 classifiers = [
-    "Development Status :: 3 - Alpha",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    'Intended Audience :: Science/Research',
-    'Topic :: Scientific/Engineering :: Artificial Intelligence',
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  'Intended Audience :: Science/Research',
+  'Topic :: Scientific/Engineering :: Artificial Intelligence',
 ]
 dependencies = [
-	"gymnasium >=0.28.1",
+  "gymnasium >=0.28.1",
   "numpy >=1.24.0",
   "typing-extensions >=4.3.0",
-	"importlib-metadata >=4.8.0; python_version < '3.10'",
+  "importlib-metadata >=4.8.0; python_version < '3.10'",
   "torch >=2.0.0",
   "wandb >=0.15",
   "tensorboard >=2.13.0",
@@ -34,37 +36,31 @@ dynamic = ["version"]
 
 
 [project.optional-dependencies]
-plots = [
-  "matplotlib >=3.7.1",
-  "pandas >=2.0.1",
-  "seaborn >=0.12.2",
-]
+plots = ["matplotlib >=3.7.1", "pandas >=2.0.1", "seaborn >=0.12.2"]
 minigrid = ["minigrid >=2.0"]
-atari = [
-  "gymnasium[atari,accept-rom-license] >=0.28.1",
-]
+atari = ["gymnasium[atari,accept-rom-license] >=0.28.1"]
 all = [
   # Dependencies for all types above
   "matplotlib >=3.7.1",
   "pandas >=2.0.1",
   "seaborn >=0.12.2",
   "minigrid >=2.0",
-  "gymnasium[all] >=0.28.1",
+  "gymnasium[atari,accept-rom-license] >=0.28.1",
 ]
 
 [project.urls]
-Homepage = "https://github.com/Jjschwartz/distributed-recurrent-rl"
-Repository = "https://github.com/Jjschwartz/distributed-recurrent-rl"
-"Bug Report" = "https://github.com/Jjschwartz/distributed-recurrent-rl/issues"
+Homepage = "https://github.com/Jjschwartz/miniDRL"
+Repository = "https://github.com/Jjschwartz/miniDRL"
+"Bug Report" = "https://github.com/Jjschwartz/miniDRL/issues"
 
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["d2rl", "d2rl.*"]
+include = ["minidrl", "minidrl.*"]
 
 [tool.setuptools.package-data]
-d2rl = ["py.typed"]
+minidrl = ["py.typed"]
 
 # Linters and Test tools #######################################################
 
@@ -74,7 +70,7 @@ line-length = 88
 
 [tool.ruff]
 # https://beta.ruff.rs/docs/settings/
-src = ["d2rl", "tests"]
+src = ["minidrl", "tests"]
 extend-select = ["C4", "SIM", "TCH"]
 show-fixes = true
 # Same as Black.
@@ -96,7 +92,7 @@ lines-after-imports = 2
 extra-standard-library = ["typing_extensions"]
 
 [tool.pyright]
-include = ["porl/**"]
+include = ["minidrl/**"]
 exclude = ["**/__pycache__"]
 strict = []
 
@@ -119,10 +115,9 @@ reportInvalidTypeVarUse = "none"
 # reportUnknownParameterType = "warning"  # -> raises 1327 warnings
 # reportUnknownVariableType = "warning"  # -> raises 2585 warnings
 # reportUnknownArgumentType = "warning"  # -> raises 2104 warnings
-reportGeneralTypeIssues = "none"  # -> commented out raises 489 errors
-reportUntypedFunctionDecorator = "none"  # -> pytest.mark.parameterize issues
+reportGeneralTypeIssues = "none"        # -> commented out raises 489 errors
+reportUntypedFunctionDecorator = "none" # -> pytest.mark.parameterize issues
 
 reportPrivateImportUsage = "none"
 reportPrivateUsage = "warning"
 reportUnboundVariable = "warning"
-

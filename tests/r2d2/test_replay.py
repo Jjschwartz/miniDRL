@@ -2,8 +2,8 @@
 import gymnasium as gym
 import numpy as np
 import torch
-from d2rl.r2d2.replay import R2D2PrioritizedReplay, SumTree, R2D2ActorReplayBuffer
-from d2rl.r2d2.utils import R2D2Config
+from minidrl.r2d2.replay import R2D2PrioritizedReplay, SumTree, R2D2ActorReplayBuffer
+from minidrl.r2d2.utils import R2D2Config
 
 
 def test_sum_tree():

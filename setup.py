@@ -9,7 +9,7 @@ CWD = pathlib.Path(__file__).absolute().parent
 
 def get_version():
     """Gets the version."""
-    path = CWD / "d2rl" / "__init__.py"
+    path = CWD / "minidrl" / "__init__.py"
     content = path.read_text()
 
     for line in content.splitlines():
@@ -18,4 +18,4 @@ def get_version():
     raise RuntimeError("bad version data in __init__.py")
 
 
-setup(name="d2rl", version=get_version())
+setup(name="minidrl", version=get_version())

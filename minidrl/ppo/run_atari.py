@@ -11,15 +11,15 @@ import torch
 import torch.nn as nn
 from torch.distributions.categorical import Categorical
 
-from d2rl.common.atari_wrappers import (
+from minidrl.common.atari_wrappers import (
     ClipRewardRangeEnv,
     EpisodicLifeEnv,
     FireResetEnv,
     MaxAndSkipEnv,
     NoopResetEnv,
 )
-from d2rl.ppo.ppo import run_ppo
-from d2rl.ppo.utils import PPOConfig
+from minidrl.ppo.ppo import run_ppo
+from minidrl.ppo.utils import PPOConfig
 
 
 def quadratic_episode_trigger(x: int) -> bool:
@@ -168,7 +168,7 @@ def parse_ppo_atari_args() -> PPOConfig:
         help="if toggled, cuda will be enabled by default")
     parser.add_argument("--track-wandb", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="if toggled, this experiment will be tracked with Weights and Biases")
-    parser.add_argument("--wandb-project", type=str, default="d2rl",
+    parser.add_argument("--wandb-project", type=str, default="miniDRL",
         help="the wandb's project name")
     parser.add_argument("--wandb-entity", type=str, default=None,
         help="the entity (team) of wandb's project")
