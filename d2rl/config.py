@@ -1,4 +1,4 @@
-"""Base configuration for PORL."""
+"""Base configuration for D2RL."""
 import os
 import os.path as osp
 from pathlib import Path
