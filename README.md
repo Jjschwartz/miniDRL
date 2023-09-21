@@ -32,12 +32,37 @@ tensorboard --logdir runs
 
 To use experiment tracking with wandb, run:
 
+```bash
+wandb login  # only required for the first time
+python minidrl/ppo/run_gym.py \
+    --env_id CartPole-v1 \
+    --total_timesteps 1000000 \
+    --num_workers 4 \
+    --track_wandb \
+    --wandb_project minidrltest
+```
+
 ## Algorithms
 
-This repository contains standalone implementations of some of the main distributed recurrent RL algorithms, including:
+This repository contains standalone implementations of some of the main distributed RL algorithms that support recurrent neural networks, including:
 
-- [PPO - Single Machine](https://arxiv.org/abs/1707.06347) - [code](https://github.com/Jjschwartz/miniDRL/tree/main/minidrl/ppo), [docs](https://github.com/Jjschwartz/miniDRL/blob/main/docs/ppo/ppo.md)
-- [R2D2](https://openreview.net/forum?id=r1lyTjAqYX) - [code](https://github.com/Jjschwartz/miniDRL/tree/main/minidrl/r2d2), [docs]()
+### PPO - Single Machine
+
+[Paper](https://arxiv.org/abs/1707.06347) | [code](https://github.com/Jjschwartz/miniDRL/blob/main/minidrl/ppo/ppo.py) | [docs](https://github.com/Jjschwartz/miniDRL/blob/main/docs/ppo/ppo.md)
+
+|![Learning Curve by wall time vs num workers](docs/ppo/figures/pong_vs_num_workers_wall_time.svg)|
+|:--:|
+|*Learning curve of PPO - Single Machine on Atari Pong with different number of parallel workers*|
+
+### PPO - Multi Machine
+
+**Coming Soon**
+
+### R2D2
+
+**Coming Soon**
+
+[Paper](https://openreview.net/forum?id=r1lyTjAqYX) | [code](https://github.com/Jjschwartz/miniDRL/tree/main/minidrl/r2d2) | [docs]()
 
 
 

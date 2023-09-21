@@ -1,7 +1,6 @@
 # Single Machine Distributed Recurrent PPO  
 
 
-
 ## Overview
 
 Proximal Policy Optimization (PPO) is arguably the most popular deep RL methods out there. It can be used for both discrete and continuous actions, while being relatively robust to hyperparameter choices. It's also relatively simple to parallelize PPO using multiple workers that collect each batch of data in parallel, before sending the data to a central learner.
@@ -219,3 +218,7 @@ Below are the learning curves for our implementation of PPO on the Atari-5 bench
 
 **Qbert**
 ![Qbert Learning Curve](figures/atari5_qbert_steps.svg)
+
+### All Training Results
+
+For those interested, you can access all the training results on the miniDRL wandb project page: https://wandb.ai/jjschwartz/miniDRL/
