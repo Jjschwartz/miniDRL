@@ -1,8 +1,10 @@
-# Distributed Recurrent Proximal Policy Optimization
+# Single Machine Distributed Recurrent PPO  
 
 ## Overview
 
 Proximal Policy Optimization (PPO) is arguably the most popular deep RL methods out there. It can be used for both discrete and continuous actions, while being relatively robust to hyperparameter choices. It's also relatively simple to parallelize PPO using multiple workers that collect each batch of data in parallel, before sending the data to a central learner.
+
+This implementation of PPO is designed to be run on a single machine with multiple CPU cores which communicate via shared memory. This is a relatively simple architecture, but it leads to massive speed-ups when running on a single machine with multiple cores.
 
 Original Paper:
 
@@ -50,6 +52,22 @@ This implementation of PPO is relatively simple, and leads to massive speed-ups 
 ### Scaling
 
 Here we look at how the steps per second scales with number of CPUs used.
+
+**Scaling with fixed batch size**
+
+Insert: Figure showing scaling (wrt SPS) with number of CPUs for fixed batch size in Atari.
+
+Insert: Figure showing scaling wrt experience SPS with number of CPUS for fixed batch size in Atari
+
+Insert: Figure showing scaling wrt learning SPS with number of CPUS for fixed batch size in Atari
+
+
+**Scaling with fixed number of environments per worker**
+
+Insert: Figures (SPS, experience SPS, learning SPS) showing scaling with number of CPUS for fixed number of environments per worker in Atari.
+Insert: Figure showing batch size vs number of workers
+
+
 
 
 

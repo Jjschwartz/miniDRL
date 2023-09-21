@@ -36,7 +36,7 @@ To use experiment tracking with wandb, run:
 
 This repository contains standalone implementations of some of the main distributed recurrent RL algorithms, including:
 
-- [PPO](https://arxiv.org/abs/1707.06347) - [code](https://github.com/Jjschwartz/miniDRL/tree/main/minidrl/ppo), [docs]()
+- [PPO - Single Machine](https://arxiv.org/abs/1707.06347) - [code](https://github.com/Jjschwartz/miniDRL/tree/main/minidrl/ppo), [docs](https://github.com/Jjschwartz/miniDRL/blob/main/docs/ppo/ppo.md)
 - [R2D2](https://openreview.net/forum?id=r1lyTjAqYX) - [code](https://github.com/Jjschwartz/miniDRL/tree/main/minidrl/r2d2), [docs]()
 
 

@@ -20,7 +20,20 @@ from minidrl.config import BASE_RESULTS_DIR
 
 @dataclass
 class PPOConfig:
-    """Configuration for Distributed PPO."""
+    """Configuration for Distributed PPO.
+
+    Note, the `env_creator_fn_getter` and `model_loader` attributes must be set after
+    initialization:
+
+    ```python
+    config = PPOConfig()
+    config.env_creator_fn_getter = my_env_creator_fn_getter
+    config.model_loader = my_model_loader
+    ```
+
+    For examples see the `minidrl/ppo/run_atari.py` and `minidrl/ppo/run_gym.py` files.
+
+    """
 
     # The name of this experiment
     exp_name: str = "ppo"
