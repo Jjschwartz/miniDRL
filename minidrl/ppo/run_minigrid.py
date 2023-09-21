@@ -161,11 +161,12 @@ def get_minigrid_env_creator_fn(
     """Get environment creator function."""
 
     def thunk():
-        env = gym.make(config.env_id, max_episode_steps=256)
+        capture_video = config.capture_video and worker_idx == 0 and env_idx == 0
+        render_mode = "rgb_array" if capture_video else None
+        env = gym.make(config.env_id, max_episode_steps=256, render_mode=render_mode)
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        if config.capture_video and worker_idx == 0 and env_idx == 0:
+        if capture_video:
             env = gym.wrappers.RecordVideo(env, config.video_dir)
-
         # take image observations and normalise to [0, 1]
         obs_space = env.observation_space
         env = gym.wrappers.TransformObservation(env, lambda obs: obs["image"] / 255.0)
@@ -187,12 +188,8 @@ def get_minigrid_env_creator_fn(
     return thunk
 
 
-def run_ppo_minigrid(config: PPOConfig):
+if __name__ == "__main__":
+    config = pyrallis.parse(config_class=PPOConfig)
     config.env_creator_fn_getter = get_minigrid_env_creator_fn
     config.model_loader = minigrid_model_loader
     run_ppo(config)
-
-
-if __name__ == "__main__":
-    cfg = pyrallis.parse(config_class=PPOConfig)
-    run_ppo_minigrid(cfg)
