@@ -167,10 +167,8 @@ class R2D2Config:
 
     # Debugging configuration
     # -----------------------
-    # number of steps to run actor for, can be set so run_actor can be tested
-    debug_actor_steps: int | None = None
-    # disable logging
-    debug_disable_tensorboard: bool = False
+    # disable logging to tensorboard and wandb
+    disable_logging: bool = False
 
     def __post_init__(self):
         """Post initialization."""

@@ -20,10 +20,11 @@ from __future__ import annotations
 
 import os
 import random
+import threading
 import time
 from dataclasses import asdict
 from multiprocessing.queues import Empty
-from typing import TYPE_CHECKING, Dict, Tuple
+from typing import TYPE_CHECKING
 
 import gymnasium as gym
 import numpy as np
@@ -32,10 +33,10 @@ import torch.multiprocessing as mp
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
-from minidrl.r2d2.replay import R2D2ActorReplayBuffer, R2D2PrioritizedReplay
+from minidrl.r2d2.replay import run_replay_process
+
 
 if TYPE_CHECKING:
-    from minidrl.r2d2.network import R2D2Network
     from minidrl.r2d2.utils import R2D2Config
 
 
@@ -46,7 +47,7 @@ def compute_loss_and_priority(
     rewards: torch.Tensor,
     dones: torch.Tensor,
     target_q_values: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute the loss and priority for a batch of transitions.
 
     T = sequence length (i.e. unrolled sequence length, excluding burnin)
@@ -158,13 +159,20 @@ def compute_loss_and_priority(
 def run_actor(
     actor_idx: int,
     config: R2D2Config,
-    learner_model: R2D2Network,
-    input_queue: mp.Queue,
-    actor_storage: Dict[str, torch.Tensor],
-    actor_lock: mp.Lock,
-    output_queue: mp.Queue | None = None,
+    replay_queue: mp.Queue,
+    learner_send_queue: mp.Queue,
+    learner_recv_queue: mp.Queue,
 ):
-    """Run an R2D2 actor process that collects trajectories."""
+    """Run an R2D2 actor process that collects trajectories and sends them to replay.
+
+    Arguments
+    ---------
+    actor_idx : The index of the actor.
+    config : Configuration for R2D2.
+    replay_queue : Queue for sending trajectories to replay.
+    learner_send_queue : Queue for sending results and parameter requests to learner.
+    learner_recv_queue : Queue for receiving parameters and other signals from learner.
+    """
     print(f"actor={actor_idx}: Actor started.")
     # seeding
     np_rng = np.random.RandomState(actor_idx)
@@ -190,25 +198,19 @@ def run_actor(
     num_envs = config.num_envs_per_actor
 
     # model setup
-
     actor_model = config.load_model()
     actor_model.to(device)
     # disable autograd for actor model
     for param in actor_model.parameters():
         param.requires_grad = False
+    learner_model_state = None
 
-    # replay buffer setup
-    replay = R2D2ActorReplayBuffer(
-        actor_idx=actor_idx, config=config, actor_lock=actor_lock, **actor_storage
-    )
-
+    # Sequence buffer setup
     total_seq_len = config.seq_len + config.burnin_len
-    # how many timesteps to drop from the start of the sequence after each sequence
-    # is added to the replay buffer
+    # timesteps to drop from the start of the sequence after sequence added to replay
     seq_drop_len = max(1, config.seq_len // 2)
-
     # sequence buffers: o_t, a_tm1, r_tm1, d_tm1, q_t, h_0
-    # stores burnin_len + seq_len + 1timesteps
+    # stores burnin_len + seq_len + 1 timesteps
     obs_seq_buffer = torch.zeros(
         (total_seq_len + 1, num_envs, *obs_space.shape), dtype=torch.float32
     )
@@ -248,19 +250,27 @@ def run_actor(
     num_episodes_completed = 0
     start_time = time.time()
     # main loop - runs until learner sends end signal
-    # or if in debug mode, until debug_actor_steps is reached
-    while config.debug_actor_steps is None or step < config.debug_actor_steps:
+    while True:
         # check if learner has finished training
         try:
-            input_queue.get_nowait()
+            learner_recv_queue.get_nowait()
             print(f"actor={actor_idx} - t={step}: End training signal recieved.")
             break
         except Empty:
             pass
 
         if step % config.actor_update_interval == 0:
-            # print(f"i={actor_idx} - t={step}: Updating actor model.")
-            actor_model.load_state_dict(learner_model.state_dict())
+            # request latest model parameters from learner
+            print(f"actor={actor_idx} - t={step}: Updating actor model.")
+            learner_send_queue.put(("get_latest_params", actor_idx))
+            result = learner_recv_queue.get()
+            # need to handle case where exit signal has been sent in the meantime
+            if result[0] == "params":
+                actor_model.load_state_dict(result[1])
+            else:
+                assert result[0] == "terminate"
+                print(f"actor={actor_idx} - t={step}: End training signal recieved.")
+                break
 
         # q_t = Q(o_t, a_tm1, r_tm1, d_tm1)
         q_vals, lstm_state = actor_model.forward(
@@ -309,14 +319,16 @@ def run_actor(
                 target_q_values=q_vals_seq_buffer[config.burnin_len :],
             )
 
-            replay.add(
-                obs_seq_buffer,
-                action_seq_buffer,
-                reward_seq_buffer,
-                done_buffer,
-                lstm_h_seq_buffer,
-                lstm_c_seq_buffer,
-                priority,
+            replay_queue.put(
+                (
+                    obs_seq_buffer.clone(),
+                    action_seq_buffer.clone(),
+                    reward_seq_buffer.clone(),
+                    done_buffer.clone(),
+                    lstm_h_seq_buffer.clone(),
+                    lstm_c_seq_buffer.clone(),
+                    priority.clone(),
+                )
             )
 
             # reset sequence buffers, keeping the last burnin + seq_len / 2 steps
@@ -338,21 +350,24 @@ def run_actor(
             # add lstm state to queue for next sequence
             lstm_state_queue.append(lstm_state)
 
-        for item in [
-            i for i in info.get("final_info", []) if i is not None and "episode" in i
-        ]:
-            episode_returns[num_episodes_completed % 100] = item["episode"]["r"][0]
-            episode_lengths[num_episodes_completed % 100] = item["episode"]["l"][0]
-            num_episodes_completed += 1
+        if actor_idx == config.num_actors - 1:
+            # accumulate and send results to learner
+            # only send from last actor since it has smallest exploration epsilon
+            for item in [
+                i
+                for i in info.get("final_info", [])
+                if i is not None and "episode" in i
+            ]:
+                episode_returns[num_episodes_completed % 100] = item["episode"]["r"][0]
+                episode_lengths[num_episodes_completed % 100] = item["episode"]["l"][0]
+                num_episodes_completed += 1
 
-        if step > 0 and step % 1000 == 0 and output_queue is not None:
-            # send results to learner
-            print(f"actor={actor_idx} - t={step}: Sending results to learner.")
-            sps = int(step * config.num_envs_per_actor) / (time.time() - start_time)
-            ep_returns = episode_returns[:num_episodes_completed]
-            ep_lengths = episode_lengths[:num_episodes_completed]
-            output_queue.put(
-                {
+            if step > 0 and step % 1000 == 0:
+                print(f"actor={actor_idx} - t={step}: Sending results to learner.")
+                sps = int(step * config.num_envs_per_actor) / (time.time() - start_time)
+                ep_returns = episode_returns[:num_episodes_completed]
+                ep_lengths = episode_lengths[:num_episodes_completed]
+                results = {
                     "actor_steps": step,
                     "actor_sps": sps,
                     "mean_episode_returns": ep_returns.mean().item(),
@@ -361,12 +376,19 @@ def run_actor(
                     "mean_episode_lengths": ep_lengths.mean().item(),
                     "actor_episodes_completed": num_episodes_completed,
                 }
-            )
+                learner_send_queue.put(("send_results", results))
 
         step += 1
 
     envs.close()
-    print(f"i={actor_idx} - t={step}: Actor Finished.")
+    del learner_model_state
+
+    # wait for queue to empty
+    print(f"actor={actor_idx} - t={step}: Waiting for queues to empty.")
+    while not replay_queue.empty():
+        time.sleep(1)
+
+    print(f"actor={actor_idx} - t={step}: Actor Finished.")
 
 
 def run_r2d2(config: R2D2Config):
@@ -392,14 +414,10 @@ def run_r2d2(config: R2D2Config):
     device = config.device
     model = config.load_model()
     model.to(device)
-    model.share_memory()
 
     target_model = config.load_model()
     target_model.to(device)
     target_model.load_state_dict(model.state_dict())
-
-    # replay buffer setup
-    replay = R2D2PrioritizedReplay(obs_space, config)
 
     # Actor Setup
     # `fork` not supported by CUDA
@@ -407,25 +425,36 @@ def run_r2d2(config: R2D2Config):
     # must use context to set start method
     mp_ctxt = mp.get_context("spawn")
 
-    # create queues for communication
-    input_queues = []
-    output_queue = mp_ctxt.Queue()
+    # create queues for communication between learner, actors, and replay
+    actor_replay_queue = mp_ctxt.Queue()
+    actor_recv_queue = mp_ctxt.Queue()
+    actor_send_queues = [mp_ctxt.Queue() for _ in range(config.num_actors)]
+    replay_send_queue = mp_ctxt.Queue()
+    replay_recv_queue = mp_ctxt.Queue()
+
+    # spawn replay process
+    replay_process = mp_ctxt.Process(
+        target=run_replay_process,
+        args=(
+            config,
+            actor_replay_queue,
+            replay_send_queue,
+            replay_recv_queue,
+        ),
+    )
+    replay_process.start()
+
+    # spawn actor processes
     actors = []
     for actor_idx in range(config.num_actors):
-        input_queues.append(mp_ctxt.Queue())
-        actor_storage, actor_lock = replay.get_actor_storage(actor_idx)
         actor = mp_ctxt.Process(
             target=run_actor,
             args=(
                 actor_idx,
                 config,
-                model,
-                input_queues[actor_idx],
-                actor_storage,
-                actor_lock,
-                # get episode results from last actor since it has smallest exploration
-                # epsilon
-                output_queue if actor_idx == config.num_actors - 1 else None,
+                actor_replay_queue,
+                actor_recv_queue,
+                actor_send_queues[actor_idx],
             ),
         )
         actor.start()
@@ -433,7 +462,7 @@ def run_r2d2(config: R2D2Config):
 
     # Logging setup
     # Do this after workers are spawned to avoid log duplication
-    if not config.debug_disable_tensorboard and config.track_wandb:
+    if not config.disable_logging and config.track_wandb:
         import wandb
 
         wandb.init(
@@ -445,7 +474,7 @@ def run_r2d2(config: R2D2Config):
             monitor_gym=True,
             save_code=True,
         )
-    if not config.debug_disable_tensorboard:
+    if not config.disable_logging:
         writer = SummaryWriter(config.log_dir)
         writer.add_text(
             "hyperparameters",
@@ -460,18 +489,69 @@ def run_r2d2(config: R2D2Config):
         model.parameters(), lr=config.learning_rate, eps=config.adam_eps
     )
 
+    # Global training step
+    # Careful: shared beween threads on learner process so needs to be set up before
+    # defining thread function
+    global_step = 0
+
+    # Setup parameter synchronization thread
+    parameter_lock = threading.Lock()
+    end_training_event = threading.Event()
+
+    def run_param_sync_thread():
+        """Runs a thread that synchronizes parameters between learner and actors."""
+        print("param_sync_thread: started")
+        while not end_training_event.is_set():
+            try:
+                # set timeout so that we can check if training is done
+                request = actor_recv_queue.get(timeout=1)
+                if request[0] == "get_latest_params":
+                    with parameter_lock:
+                        model_state = {
+                            k: v.cpu() for k, v in model.state_dict().items()
+                        }
+                    actor_send_queues[request[1]].put(("params", model_state))
+                elif request[0] == "send_results":
+                    # log actor results
+                    if writer is not None:
+                        for key, value in request[1].items():
+                            writer.add_scalar(f"charts/{key}", value, global_step)
+
+                    result_output = [f"learner: actor results (step={global_step})"]
+                    for key, value in request[1].items():
+                        # log to stdout
+                        if isinstance(value, float):
+                            result_output.append(f"{key}={value:0.4f}")
+                        else:
+                            result_output.append(f"learner: {key}={value}")
+                    print("\n  ".join(result_output))
+
+                else:
+                    raise ValueError(f"Unknown request {request}")
+            except Empty:
+                pass
+
+        print("param_sync_thread: done")
+
+    param_sync_thread = threading.Thread(target=run_param_sync_thread)
+    param_sync_thread.start()
+
     # Wait for actors to start and fill replay buffer
-    print("learner: Waiting for actors to start and replay buffer to fill...")
-    while replay.size < config.learning_starts:
-        time.sleep(0.1)
+    replay_send_queue.put(("get_buffer_size", None))
+    buffer_size = replay_recv_queue.get()
+    assert buffer_size >= config.learning_starts
 
     # Training loop
     print("learner: Starting training loop...")
     start_time = time.time()
-    for step in range(config.total_timesteps):
+    # placeholders for samples, so we can release them later
+    samples, indices, weights = None, None, None
+    obs, actions, rewards, dones, lstm_h, lstm_c = None, None, None, None, None, None
+    while global_step < config.total_timesteps:
         sample_start_time = time.time()
         # samples: (T, B, ...), indices: (B,), weights: (B,)
-        samples, indices, weights = replay.sample(config.batch_size, device=device)
+        replay_send_queue.put(("sample", config.batch_size))
+        samples, indices, weights = replay_recv_queue.get()
         sample_time = time.time() - sample_start_time
 
         # unpack samples: o_t, a_t, r_t, d_t, lsmt_h_0, lstm_c_0
@@ -498,8 +578,8 @@ def run_r2d2(config: R2D2Config):
                 )
         burnin_time = time.time() - burnin_time_start
 
+        # compute loss and gradients and update parameters
         learning_start_time = time.time()
-        # compute loss and gradients
         optimizer.zero_grad()
 
         q_values, _ = model.forward(
@@ -528,91 +608,112 @@ def run_r2d2(config: R2D2Config):
             target_q_values=target_q_values,
         )
         loss = torch.mean(loss * weights.detach())
-        loss.backward()
 
-        if config.clip_grad_norm:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+        with parameter_lock:
+            loss.backward()
+            if config.clip_grad_norm:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+            optimizer.step()
 
-        optimizer.step()
         learning_time = time.time() - learning_start_time
 
         # update priorities
-        priority_update_start_time = time.time()
-        replay.update_priorities(indices, priorities.tolist())
-        priority_update_time = time.time() - priority_update_start_time
+        replay_send_queue.put(("update_priorities", indices, priorities.tolist()))
 
-        # update target network
-        if step > 1 and step % config.target_network_update_interval == 0:
-            print(f"\nlearner: {step=} - updating target network.")
+        if global_step > 1 and global_step % config.target_network_update_interval == 0:
+            print(f"\nlearner: {global_step=} - updating target network.")
             target_model.load_state_dict(model.state_dict())
 
         # log metrics
-        sps = int(step / (time.time() - start_time))
+        sps = int(global_step / (time.time() - start_time))
         q_max = torch.mean(torch.max(q_values, dim=-1)[0])
 
-        try:
-            actor_results = output_queue.get_nowait()
-        except Empty:
-            actor_results = {}
-
-        if actor_results:
+        if global_step > 0 and global_step % config.actor_update_interval == 0:
             # periodically log to stdout
-            print(f"\nlearner: {step=}")
+            print(f"\nlearner: {global_step=}")
             print(f"learner: loss={loss.item():0.6f}")
             print(f"learner: q_max={q_max.item():0.6f}")
             print(f"learner: {sps=:d}")
-            for key, value in actor_results.items():
-                if isinstance(value, float):
-                    print(f"learner: {key}={value:0.4f}")
-                else:
-                    print(f"learner: {key}={value}")
 
         if writer is not None:
             writer.add_scalar(
-                "charts/learning_rate", optimizer.param_groups[0]["lr"], step
+                "charts/learning_rate", optimizer.param_groups[0]["lr"], global_step
             )
-            for key, value in actor_results.items():
-                writer.add_scalar(f"charts/{key}", value, step)
-            writer.add_scalar("losses/value_loss", loss.item(), step)
-            writer.add_scalar("losses/q_max", q_max.item(), step)
-            writer.add_scalar("losses/mean_priorities", priorities.mean().item(), step)
-            writer.add_scalar("losses/max_priorities", priorities.max().item(), step)
-            writer.add_scalar("losses/min_priorities", priorities.min().item(), step)
-            writer.add_scalar("times/learner_SPS", sps, step)
-            writer.add_scalar("times/sample_time", sample_time, step)
-            writer.add_scalar("times/burnin_time", burnin_time, step)
-            writer.add_scalar("times/learning_time", learning_time, step)
-            writer.add_scalar("times/priority_update_time", priority_update_time, step)
+            writer.add_scalar("losses/value_loss", loss.item(), global_step)
+            writer.add_scalar("losses/q_max", q_max.item(), global_step)
+            writer.add_scalar(
+                "losses/mean_priorities", priorities.mean().item(), global_step
+            )
+            writer.add_scalar(
+                "losses/max_priorities", priorities.max().item(), global_step
+            )
+            writer.add_scalar(
+                "losses/min_priorities", priorities.min().item(), global_step
+            )
+            writer.add_scalar("times/learner_SPS", sps, global_step)
+            writer.add_scalar("times/sample_time", sample_time, global_step)
+            writer.add_scalar("times/burnin_time", burnin_time, global_step)
+            writer.add_scalar("times/learning_time", learning_time, global_step)
 
-        if config.save_interval > 0 and step > 0 and step % config.save_interval == 0:
+        if (
+            config.save_interval > 0
+            and global_step > 0
+            and global_step % config.save_interval == 0
+        ):
             print("Saving model")
             torch.save(
                 {
                     "model": model.state_dict(),
                     "optimizer": optimizer.state_dict(),
-                    "global_step": step,
+                    "global_step": global_step,
                     "config": asdict(config),
                 },
-                os.path.join(config.log_dir, f"checkpoint_{step}.pt"),
+                os.path.join(config.log_dir, f"checkpoint_{global_step}.pt"),
             )
+
+        global_step += 1
+
+    print("Training complete. Shutting down...")
 
     # cleanup
     env.close()
 
+    print("Shutting down parameter synchronization thread.")
+    end_training_event.set()
+    param_sync_thread.join()
+
     if writer is not None:
         writer.close()
 
-    print("Training complete")
-    print("Sending stop signal to actors.")
+    print("Sending end signals to replay and actor processes.")
+    del samples, indices, weights
+    del obs, actions, rewards, dones, lstm_h, lstm_c
+    replay_send_queue.put(("terminate", None))
     for i in range(config.num_actors):
-        input_queues[i].put("terminate")
+        actor_send_queues[i].put("terminate")
 
-    print("Stop signal sent, joining actors.")
+    print("Joining replay process.")
+    replay_process.join()
+
+    print("Draining replay and actor queues.")
+    while not actor_replay_queue.empty():
+        actor_replay_queue.get()
+    while not replay_recv_queue.empty():
+        replay_recv_queue.get()
+    while not actor_recv_queue.empty():
+        actor_recv_queue.get()
+
+    print("Joining actors.")
     for i in range(config.num_actors):
         actors[i].join()
 
-    print("Actors successfully joined. Cleaning up communication queues.")
+    print("Replay and actor processes successfully joined.")
+    print("Cleaning up communication queues.")
+    actor_replay_queue.close()
+    replay_send_queue.close()
+    replay_recv_queue.close()
+    actor_recv_queue.close()
     for i in range(config.num_actors):
-        input_queues[i].close()
+        actor_send_queues[i].close()
 
     print("All done")

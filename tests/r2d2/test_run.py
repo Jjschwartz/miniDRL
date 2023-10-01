@@ -37,21 +37,26 @@ def test_run_r2d2_single_actor():
         lstm_size=32,
         head_sizes=[32],
         # debug
-        debug_actor_steps=None,
-        debug_disable_tensorboard=True,
+        disable_logging=True,
     )
     run_r2d2(config)
 
 
 def test_run_r2d2_multi_actor():
     """Tests running R2D2."""
+    num_cpus = os.cpu_count()
+    assert num_cpus is not None
+    if num_cpus <= 4:
+        print("Skipping multi-actor test because insufficient CPUs is available.")
+        return
+
     config = R2D2Config(
         env_id="CartPole-v1",
         # tracking
         track_wandb=False,
         # training config
         total_timesteps=100,
-        num_actors=os.cpu_count() - 1,
+        num_actors=2,
         num_envs_per_actor=8,
         actor_device="cuda",
         # replay
@@ -73,8 +78,7 @@ def test_run_r2d2_multi_actor():
         lstm_size=32,
         head_sizes=[32],
         # debug
-        debug_actor_steps=None,
-        debug_disable_tensorboard=True,
+        disable_logging=True,
     )
     run_r2d2(config)
 
@@ -84,5 +88,5 @@ if __name__ == "__main__":
     os.environ["OMP_NUM_THREADS"] = "1"
     torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
-    test_run_r2d2_single_actor()
-    # test_run_r2d2_multi_actor()
+    # test_run_r2d2_single_actor()
+    test_run_r2d2_multi_actor()
