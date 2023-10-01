@@ -414,6 +414,9 @@ def run_ppo(config: PPOConfig):
     device = config.device
     model = config.load_model()
     model.to(device)
+    # disable autograd for actor model
+    for param in model.parameters():
+        param.requires_grad = False
 
     # Experience buffer setup
     buf_shape = (config.seq_len, config.num_seqs_per_batch)
