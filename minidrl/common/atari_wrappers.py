@@ -15,8 +15,8 @@ import numpy as np
 
 
 class NoopResetEnv(gym.Wrapper[np.ndarray, int, np.ndarray, int]):
-    """
-    Sample initial states by taking random number of no-ops on reset.
+    """Sample initial states by taking random number of no-ops on reset.
+
     No-op is assumed to be action 0.
 
     :param env: Environment to wrap
@@ -47,8 +47,7 @@ class NoopResetEnv(gym.Wrapper[np.ndarray, int, np.ndarray, int]):
 
 
 class FireResetEnv(gym.Wrapper[np.ndarray, int, np.ndarray, int]):
-    """
-    Take action on reset for environments that are fixed until firing.
+    """Take action on reset for environments that are fixed until firing.
 
     :param env: Environment to wrap
     """
@@ -70,8 +69,8 @@ class FireResetEnv(gym.Wrapper[np.ndarray, int, np.ndarray, int]):
 
 
 class EpisodicLifeEnv(gym.Wrapper[np.ndarray, int, np.ndarray, int]):
-    """
-    Make end-of-life == end-of-episode, but only reset on true game over.
+    """Make end-of-life == end-of-episode, but only reset on true game over.
+
     Done by DeepMind for the DQN and co. since it helps value estimation.
 
     :param env: Environment to wrap
@@ -121,9 +120,9 @@ class EpisodicLifeEnv(gym.Wrapper[np.ndarray, int, np.ndarray, int]):
 
 
 class MaxAndSkipEnv(gym.Wrapper[np.ndarray, int, np.ndarray, int]):
-    """
-    Return only every ``skip``-th frame (frameskipping)
-    and return the max between the two last frames.
+    """Return only every ``skip``-th frame (frameskipping)
+
+    Return the max between the two last frames.
 
     :param env: Environment to wrap
     :param skip: Number of ``skip``-th frame
@@ -172,8 +171,7 @@ class MaxAndSkipEnv(gym.Wrapper[np.ndarray, int, np.ndarray, int]):
 
 
 class ClipRewardEnv(gym.RewardWrapper):
-    """
-    Clip the reward to {+1, 0, -1} by its sign.
+    """Clip the reward to {+1, 0, -1} by its sign.
 
     :param env: Environment to wrap
     """

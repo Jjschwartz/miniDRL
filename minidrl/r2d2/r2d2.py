@@ -12,19 +12,15 @@ https://github.com/michaelnny/deep_rl_zoo/tree/main
 TODO:
 - [ ] Test for any issues with multiprocessing race-conditions
 - [ ] Evaluation worker
-- [ ] Add +1 to seq len when computing loss and priority
-- [ ] Update code to account for o_t, a_tm1, r_tm1, d_tm1, q_t in buffer
 - [ ] Zero out prev action and reward for first step in episode?
 """
-from __future__ import annotations
-
 import os
 import random
 import threading
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from multiprocessing.queues import Empty
-from typing import TYPE_CHECKING
+from typing import Optional
 
 import gymnasium as gym
 import numpy as np
@@ -33,11 +29,197 @@ import torch.multiprocessing as mp
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
+from minidrl.config import BASE_RESULTS_DIR
 from minidrl.r2d2.replay import run_replay_process
 
 
-if TYPE_CHECKING:
-    from minidrl.r2d2.utils import R2D2Config
+@dataclass
+class R2D2Config:
+    """Configuration for R2D2 algorithm.
+
+    Note, the `env_creator_fn_getter` and `model_loader` attributes must be set after
+    initialization:
+
+    ```python
+    config = R2D2Config()
+    config.env_creator_fn_getter = my_env_creator_fn_getter
+    config.model_loader = my_model_loader
+    ```
+
+    For examples see the `minidrl/r2d2/run_atari.py` and `minidrl/r2d2/run_gym.py`
+    files.
+
+    """
+
+    # The name of this experiment
+    exp_name: str = "r2d2"
+    # The name of this run
+    run_name: str = field(init=False, default="<exp_name>_<env_id>_<seed>_<time>")
+    # Experiment seed
+    seed: int = 0
+    # Whether to set torch to deterministic mode
+    # `torch.backends.cudnn.deterministic=False`
+    torch_deterministic: bool = True
+    # Whether to use CUDA
+    cuda: bool = True
+    # Number of updates between saving the policy model. If `save_interval > 0`, then
+    # the policy model will be saved every `save_interval` updates as well as after the
+    # final update.
+    save_interval: int = 0
+
+    # Wether to track the experiment with WandB
+    track_wandb: bool = False
+    # WandB project name
+    wandb_project: str = "miniDRL"
+    # WandB entity (team) name
+    wandb_entity: Optional[str] = None
+
+    # The ID of the gymnasium environment
+    env_id: str = "CartPole-v1"
+    # Whether to capture videos of the agent performances (check out `videos` folder)
+    capture_video: bool = False
+
+    # Total number of timesteps to train for
+    total_timesteps: int = 10000000
+    # Number of parallel actors to use for collecting trajectories
+    num_actors: int = 4
+    # Device used by actor models
+    actor_device: torch.device = torch.device("cpu")
+    # Number of parallel environments per actor
+    num_envs_per_actor: int = 16
+    # Number of environment steps between updating actor parameters
+    actor_update_interval: int = 400
+    # base epsilon for actor epsilon-greedy exploration
+    actor_base_epsilon: float = 0.05
+
+    # Length of sequences stored and sampled from the replay buffer
+    seq_len: int = 80
+    # Length of burn-in sequence for each training sequence
+    burnin_len: int = 40
+    # Size of replay buffer (i.e. number of sequences)
+    replay_buffer_size: int = 100000
+    # Exponent for replay priority
+    replay_priority_exponent: float = 0.9
+    # Prioritized replay noise
+    replay_priority_noise: float = 1e-3
+    # Exponent for importance sampling
+    importance_sampling_exponent: float = 0.6
+    # Mean-max TD error mix proportion for priority calculation
+    priority_td_error_mix: float = 0.9
+    # The Discount factor
+    gamma: float = 0.997
+    # Size (i.e. number of sequence) of each learner update batch
+    batch_size: int = 64
+    # Number of steps for n-step return
+    n_steps: int = 5
+    # Learning rate of the optimizer
+    learning_rate: float = 1e-4
+    # Adam optimizer epsilon
+    adam_eps: float = 1e-3
+    # Size of replay buffer before learning starts
+    learning_starts: int = 500
+    # Target network update interval (in terms of number of updates)
+    target_network_update_interval: int = 2500
+    # Whether to use value function rescaling or not
+    value_rescaling: bool = True
+    # Epsilon used for value function rescaling
+    value_rescaling_epsilon: float = 0.001
+    # Whether to clip the gradient norm
+    clip_grad_norm: bool = True
+    # Maximum gradient norm
+    max_grad_norm: float = 0.5
+
+    # Size of LSTM hidden state
+    # Should be set based on model being used or will attempt to be inferred from
+    # the model, assuming it has an LSTM layer.
+    lstm_size_: Optional[int] = None
+
+    # Function that returns an environment creator function
+    # Callable[[R2D2Config, int, int | None], Callable[[], gym.Env]
+    # Should be set after initialization
+    env_creator_fn_getter: callable = field(init=False, default=None)
+    # Function for loading model: Callable[[R2D2Config], nn.Module]
+    # Should be set after initialization
+    model_loader: callable = field(init=False, default=None)
+
+    def __post_init__(self):
+        """Post initialization."""
+        self.run_name = self.exp_name
+        if self.env_id not in self.exp_name:
+            self.run_name += f"_{self.env_id}"
+        self.run_name += f"_{self.seed}_{int(time.time())}"
+
+        self.actor_device = torch.device(
+            self.actor_device if torch.cuda.is_available() and self.cuda else "cpu"
+        )
+
+        assert self.seq_len > 0, "Sequence length must be greater than 0."
+        assert (
+            self.seq_len == 1 or self.seq_len % 2 == 0
+        ), "Sequence length must be 1 or even."
+        assert self.replay_buffer_size >= self.learning_starts >= self.batch_size
+
+    @property
+    def log_dir(self) -> str:
+        """Directory where the model and logs will be saved."""
+        return os.path.join(BASE_RESULTS_DIR, self.run_name)
+
+    @property
+    def video_dir(self) -> str:
+        """Directory where videos will be saved."""
+        return os.path.join(self.log_dir, "videos")
+
+    @property
+    def device(self) -> torch.device:
+        """Device where learner model is run."""
+        return torch.device(
+            "cuda" if torch.cuda.is_available() and self.cuda else "cpu"
+        )
+
+    @property
+    def total_num_envs(self) -> int:
+        """Total number of environments."""
+        return self.num_envs_per_actor * self.num_actors
+
+    @property
+    def lstm_size(self) -> int:
+        """Size of LSTM hidden state."""
+        if self.lstm_size_ is None:
+            # Attempt to infer lstm size from model
+            model = self.load_model()
+            for m in model.modules():
+                if isinstance(m, torch.nn.LSTM):
+                    self.lstm_size_ = m.hidden_size
+
+            assert self.lstm_size_ is not None, (
+                "Could not infer LSTM size from model. Please ensure that the model "
+                "has an torch.nn.LSTM layer or that the `lstm_size_` attribute is set "
+                "in the config."
+            )
+
+        return self.lstm_size_
+
+    def load_model(self):
+        """Load the model."""
+        return self.model_loader(self)
+
+    def get_actor_epsilon(self, actor_idx: int) -> float:
+        """Get the epsilon for the actor with index `actor_idx`.
+
+        Similar to the Ape-X paper each actor is assigned a different epsilon value
+        for exploration. Specifically, actor i in [0, num_actors) has an epsilon of:
+
+            epsilon_i = base_epsilon * (1 - i / num_actors)
+
+        This is different from the original paper where the epsilon is:
+
+            epsilon_i = base_epsilon ** (1 + i / num_actors * alpha)
+
+        The original paper's epsilon schedule doesn't work as well when the number of
+        actors is low (it assigns very low epsilon valus to all actors).
+
+        """
+        return self.actor_base_epsilon * (1 - actor_idx / self.num_actors)
 
 
 def compute_loss_and_priority(
@@ -174,6 +356,12 @@ def run_actor(
     learner_recv_queue : Queue for receiving parameters and other signals from learner.
     """
     print(f"actor={actor_idx}: Actor started.")
+
+    # Limit each actor to using a single CPU thread.
+    # This prevents each actor from using all available cores, which can lead to each
+    # actor being slower due to contention.
+    torch.set_num_threads(1)
+
     # seeding
     np_rng = np.random.RandomState(actor_idx)
 
@@ -203,7 +391,6 @@ def run_actor(
     # disable autograd for actor model
     for param in actor_model.parameters():
         param.requires_grad = False
-    learner_model_state = None
 
     # Sequence buffer setup
     total_seq_len = config.seq_len + config.burnin_len
@@ -261,12 +448,13 @@ def run_actor(
 
         if step % config.actor_update_interval == 0:
             # request latest model parameters from learner
-            print(f"actor={actor_idx} - t={step}: Updating actor model.")
+            # print(f"actor={actor_idx} - t={step}: Updating actor model.")
             learner_send_queue.put(("get_latest_params", actor_idx))
             result = learner_recv_queue.get()
             # need to handle case where exit signal has been sent in the meantime
             if result[0] == "params":
                 actor_model.load_state_dict(result[1])
+                del result
             else:
                 assert result[0] == "terminate"
                 print(f"actor={actor_idx} - t={step}: End training signal recieved.")
@@ -321,13 +509,13 @@ def run_actor(
 
             replay_queue.put(
                 (
-                    obs_seq_buffer.clone(),
-                    action_seq_buffer.clone(),
-                    reward_seq_buffer.clone(),
-                    done_buffer.clone(),
-                    lstm_h_seq_buffer.clone(),
-                    lstm_c_seq_buffer.clone(),
-                    priority.clone(),
+                    obs_seq_buffer,
+                    action_seq_buffer,
+                    reward_seq_buffer,
+                    done_buffer,
+                    lstm_h_seq_buffer,
+                    lstm_c_seq_buffer,
+                    priority,
                 )
             )
 
@@ -363,7 +551,7 @@ def run_actor(
                 num_episodes_completed += 1
 
             if step > 0 and step % 1000 == 0:
-                print(f"actor={actor_idx} - t={step}: Sending results to learner.")
+                # print(f"actor={actor_idx} - t={step}: Sending results to learner.")
                 sps = int(step * config.num_envs_per_actor) / (time.time() - start_time)
                 ep_returns = episode_returns[:num_episodes_completed]
                 ep_lengths = episode_lengths[:num_episodes_completed]
@@ -381,7 +569,6 @@ def run_actor(
         step += 1
 
     envs.close()
-    del learner_model_state
 
     # wait for queue to empty
     print(f"actor={actor_idx} - t={step}: Waiting for queues to empty.")
@@ -426,7 +613,7 @@ def run_r2d2(config: R2D2Config):
     mp_ctxt = mp.get_context("spawn")
 
     # create queues for communication between learner, actors, and replay
-    actor_replay_queue = mp_ctxt.Queue()
+    actor_replay_queue = mp_ctxt.Queue(maxsize=100)
     actor_recv_queue = mp_ctxt.Queue()
     actor_send_queues = [mp_ctxt.Queue() for _ in range(config.num_actors)]
     replay_send_queue = mp_ctxt.Queue()
@@ -462,7 +649,7 @@ def run_r2d2(config: R2D2Config):
 
     # Logging setup
     # Do this after workers are spawned to avoid log duplication
-    if not config.disable_logging and config.track_wandb:
+    if config.track_wandb:
         import wandb
 
         wandb.init(
@@ -474,15 +661,13 @@ def run_r2d2(config: R2D2Config):
             monitor_gym=True,
             save_code=True,
         )
-    if not config.disable_logging:
-        writer = SummaryWriter(config.log_dir)
-        writer.add_text(
-            "hyperparameters",
-            "|param|value|\n|-|-|\n%s"
-            % ("\n".join([f"|{key}|{value}|" for key, value in vars(config).items()])),
-        )
-    else:
-        writer = None
+
+    writer = SummaryWriter(config.log_dir)
+    writer.add_text(
+        "hyperparameters",
+        "|param|value|\n|-|-|\n%s"
+        % ("\n".join([f"|{key}|{value}|" for key, value in vars(config).items()])),
+    )
 
     # Optimizer setup
     optimizer = optim.Adam(
@@ -513,11 +698,10 @@ def run_r2d2(config: R2D2Config):
                     actor_send_queues[request[1]].put(("params", model_state))
                 elif request[0] == "send_results":
                     # log actor results
-                    if writer is not None:
-                        for key, value in request[1].items():
-                            writer.add_scalar(f"charts/{key}", value, global_step)
+                    for key, value in request[1].items():
+                        writer.add_scalar(f"charts/{key}", value, global_step)
 
-                    result_output = [f"learner: actor results (step={global_step})"]
+                    result_output = [f"\nlearner: actor results (step={global_step})"]
                     for key, value in request[1].items():
                         # log to stdout
                         if isinstance(value, float):
@@ -625,7 +809,10 @@ def run_r2d2(config: R2D2Config):
             target_model.load_state_dict(model.state_dict())
 
         # log metrics
-        sps = int(global_step / (time.time() - start_time))
+        ups = int(global_step / (time.time() - start_time))
+        sps = int(global_step * config.batch_size * config.seq_len) / (
+            time.time() - start_time
+        )
         q_max = torch.mean(torch.max(q_values, dim=-1)[0])
 
         if global_step > 0 and global_step % config.actor_update_interval == 0:
@@ -633,27 +820,23 @@ def run_r2d2(config: R2D2Config):
             print(f"\nlearner: {global_step=}")
             print(f"learner: loss={loss.item():0.6f}")
             print(f"learner: q_max={q_max.item():0.6f}")
-            print(f"learner: {sps=:d}")
+            print(f"learner: {ups=:d}")
 
-        if writer is not None:
-            writer.add_scalar(
-                "charts/learning_rate", optimizer.param_groups[0]["lr"], global_step
-            )
-            writer.add_scalar("losses/value_loss", loss.item(), global_step)
-            writer.add_scalar("losses/q_max", q_max.item(), global_step)
-            writer.add_scalar(
-                "losses/mean_priorities", priorities.mean().item(), global_step
-            )
-            writer.add_scalar(
-                "losses/max_priorities", priorities.max().item(), global_step
-            )
-            writer.add_scalar(
-                "losses/min_priorities", priorities.min().item(), global_step
-            )
-            writer.add_scalar("times/learner_SPS", sps, global_step)
-            writer.add_scalar("times/sample_time", sample_time, global_step)
-            writer.add_scalar("times/burnin_time", burnin_time, global_step)
-            writer.add_scalar("times/learning_time", learning_time, global_step)
+        writer.add_scalar(
+            "charts/learning_rate", optimizer.param_groups[0]["lr"], global_step
+        )
+        writer.add_scalar("losses/value_loss", loss.item(), global_step)
+        writer.add_scalar("losses/q_max", q_max.item(), global_step)
+        writer.add_scalar(
+            "losses/mean_priorities", priorities.mean().item(), global_step
+        )
+        writer.add_scalar("losses/max_priorities", priorities.max().item(), global_step)
+        writer.add_scalar("losses/min_priorities", priorities.min().item(), global_step)
+        writer.add_scalar("times/learner_SPS", sps, global_step)
+        writer.add_scalar("times/learner_UPS", ups, global_step)
+        writer.add_scalar("times/sample_time", sample_time, global_step)
+        writer.add_scalar("times/burnin_time", burnin_time, global_step)
+        writer.add_scalar("times/learning_time", learning_time, global_step)
 
         if (
             config.save_interval > 0
@@ -682,8 +865,7 @@ def run_r2d2(config: R2D2Config):
     end_training_event.set()
     param_sync_thread.join()
 
-    if writer is not None:
-        writer.close()
+    writer.close()
 
     print("Sending end signals to replay and actor processes.")
     del samples, indices, weights

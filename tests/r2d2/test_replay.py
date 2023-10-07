@@ -3,8 +3,25 @@ import gymnasium as gym
 import numpy as np
 import torch
 import torch.multiprocessing as mp
+
+from minidrl.r2d2.r2d2 import R2D2Config
 from minidrl.r2d2.replay import R2D2PrioritizedReplay, SumTree, run_replay_process
-from minidrl.r2d2.utils import R2D2Config
+
+# The size of the LSTM in the default gym R2D2 network
+LSTM_SIZE = 128
+
+
+def get_gym_env_creator_fn(
+    config: R2D2Config,
+    env_idx: int,
+    actor_idx: int | None = None,
+) -> callable:
+    """Get environment creator function."""
+
+    def thunk():
+        return gym.make(config.env_id)
+
+    return thunk
 
 
 def test_sum_tree():
@@ -81,9 +98,9 @@ def _get_random_input(rng, env, T, B, lstm_size):
     assert isinstance(act_space, gym.spaces.Discrete)
 
     obs = torch.from_numpy(np.stack([np.stack([obs] * B)] * T))
-    actions = torch.from_numpy(rng.randint(0, act_space.n, (T, B), dtype=np.int8))
+    actions = torch.from_numpy(rng.randint(0, act_space.n, (T, B), dtype=np.int64))
     rewards = torch.from_numpy(rng.randn(T, B).astype(dtype=np.float32))
-    dones = torch.from_numpy(rng.randint(0, 2, (T, B), dtype=np.bool_))
+    dones = torch.from_numpy(rng.randint(0, 2, (T, B), dtype=np.int8))
     lstm_h = torch.from_numpy(rng.randn(1, B, lstm_size).astype(dtype=np.float32))
     lstm_c = torch.from_numpy(rng.randn(1, B, lstm_size).astype(dtype=np.float32))
     return obs, actions, rewards, dones, lstm_h, lstm_c
@@ -106,9 +123,9 @@ def test_r2d2_prioritized_replay_single_sample():
         importance_sampling_exponent=0.6,
         batch_size=8,
         learning_starts=8,
-        lstm_size=8,
+        lstm_size_=LSTM_SIZE,
     )
-    env = config.make_env()
+    env = gym.make(env_id)
     obs_space = env.observation_space
     assert isinstance(obs_space, gym.spaces.Box)
     obs_shape = obs_space.shape
@@ -187,9 +204,9 @@ def test_r2d2_prioritized_replay_batch_sample():
         importance_sampling_exponent=0.6,
         batch_size=8,
         learning_starts=8,
-        lstm_size=8,
+        lstm_size_=LSTM_SIZE,
     )
-    env = config.make_env()
+    env = gym.make(env_id)
     obs_space = env.observation_space
     assert isinstance(obs_space, gym.spaces.Box)
     obs_shape = obs_space.shape
@@ -268,9 +285,10 @@ def test_r2d2_distributed_replay():
         importance_sampling_exponent=0.6,
         batch_size=8,
         learning_starts=8,
-        lstm_size=8,
+        lstm_size_=LSTM_SIZE,
     )
-    env = config.make_env()
+    config.env_creator_fn_getter = get_gym_env_creator_fn
+    env = gym.make(env_id)
     obs_space = env.observation_space
     assert isinstance(obs_space, gym.spaces.Box)
 

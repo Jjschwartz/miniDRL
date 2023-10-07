@@ -1,6 +1,4 @@
 """Run PPO on classic gym environments."""
-from __future__ import annotations
-
 import gymnasium as gym
 import numpy as np
 import pyrallis
@@ -33,10 +31,10 @@ class PPONetwork(nn.Module):
         act_space: gym.spaces.Discrete,
     ):
         super().__init__()
-        prev_size = np.array(obs_space.shape).prod()
+        input_size = np.array(obs_space.shape).prod()
 
         self.trunk = nn.Sequential(
-            layer_init(nn.Linear(prev_size, 64)),
+            layer_init(nn.Linear(input_size, 64)),
             nn.Tanh(),
         )
 

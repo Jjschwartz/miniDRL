@@ -1,12 +1,9 @@
 """Run R2D2 on atari environments."""
-from __future__ import annotations
-
-import argparse
 import math
-from distutils.util import strtobool
 
 import gymnasium as gym
 import numpy as np
+import pyrallis
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,8 +15,7 @@ from minidrl.common.atari_wrappers import (
     MaxAndSkipEnv,
     NoopResetEnv,
 )
-from minidrl.r2d2.r2d2 import run_r2d2
-from minidrl.r2d2.utils import R2D2Config
+from minidrl.r2d2.r2d2 import R2D2Config, run_r2d2
 
 
 def quadratic_episode_trigger(x: int) -> bool:
@@ -50,7 +46,8 @@ def get_atari_env_creator_fn(
         env = EpisodicLifeEnv(env)
         if "FIRE" in env.unwrapped.get_action_meanings():
             env = FireResetEnv(env)
-        env = ClipRewardEnv(env)
+        if not config.value_rescaling:
+            env = ClipRewardEnv(env)
         env = gym.wrappers.ResizeObservation(env, (84, 84))
         env = gym.wrappers.GrayScaleObservation(env)
         env = gym.wrappers.FrameStack(env, 1)
@@ -187,93 +184,16 @@ def atari_model_loader(config: R2D2Config):
     return model
 
 
-def parse_r2d2_atari_args() -> R2D2Config:
-    """Parse command line arguments for R2D2 algorithm in Atari env."""
-    # ruff: noqa: E501
-    # fmt: off
-    parser = argparse.ArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument("--exp-name", type=str, default="r2d2_atari",
-        help="the name of this experiment")
-    parser.add_argument("--seed", type=int, default=0,
-        help="seed of the experiment")
-    parser.add_argument("--torch-deterministic", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
-        help="if toggled, `torch.backends.cudnn.deterministic=False`")
-    parser.add_argument("--cuda", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
-        help="if toggled, cuda will be enabled by default")
-    parser.add_argument("--track-wandb", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
-        help="if toggled, this experiment will be tracked with Weights and Biases")
-    parser.add_argument("--wandb-project", type=str, default="porl",
-        help="the wandb's project name")
-    parser.add_argument("--wandb-entity", type=str, default=None,
-        help="the entity (team) of wandb's project")
-    
-    # Environment specific arguments
-    parser.add_argument("--env-id", type=str, default="PongNoFrameskip-v4",
-        help="the id of the environment")
-    parser.add_argument("--capture-video", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
-        help="whether to capture videos of the agent performances (check out `videos` folder)")
+class R2D2AtariConfig(R2D2Config):
+    """R2D2 atari specific configuration."""
 
-    # Training configuration
-    parser.add_argument("--total-timesteps", type=int, default=10000000,
-        help="total timesteps of the experiments")
-    parser.add_argument("--num-actors", type=int, default=4,
-        help="the number of rollout actors collecting trajectories in parallel")
-    parser.add_argument("--num-envs-per-actor", type=int, default=8,
-        help="the number of parallel game environments")
-    parser.add_argument("--actor-update-interval", type=int, default=400,
-        help="the number of environment steps between updating actor parameters")
-    parser.add_argument("--save-interval", type=int, default=0,
-        help="checkpoint saving interval, w.r.t. updates. If save-interval <= 0, no saving.")
-    
-    # Replay buffer configuration
-    parser.add_argument("--seq-len", type=int, default=80,
-        help="length of sequences stored and sampled from the replay buffer")
-    parser.add_argument("--burnin-len", type=int, default=40,
-        help="sequence burn-in length")
-    parser.add_argument("--replay-buffer-size", type=int, default=100000,
-        help="size of replay buffer (in terms of sequences)")
-    parser.add_argument("--replay-priority-exponent", type=float, default=0.9,
-        help="exponent for replay priority")
-    parser.add_argument("--replay-priority-noise", type=float, default=1e-3,
-        help="prioritized replay noise")
-    parser.add_argument("--importance-sampling-exponent", type=float, default=0.6,
-        help="exponent for importance sampling")
-    
-    # Training hyperparameters
-    parser.add_argument("--gamma", type=float, default=0.997,
-        help="the discount factor gamma")
-    parser.add_argument("--batch-size", type=int, default=64,
-        help="size of batches")
-    parser.add_argument("--n-steps", type=int, default=5,
-        help="number of steps for n-step returns")
-    parser.add_argument("--learning-rate", type=float, default=1e-4,
-        help="the learning rate of the optimizer")
-    parser.add_argument("--adam-eps", type=float, default=1e-3,
-        help="adam epsilon")
-    parser.add_argument("--target-network-update-interval", type=int, default=2500,
-        help="target network update interval (in terms of number of updates)")
-    parser.add_argument("--value-rescaling", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
-        help="use value function rescaling or not")
-    parser.add_argument("--value-rescaling-epsilon", type=float, default=1e-3,
-        help="epsilon for value function rescaling")
-    parser.add_argument("--priority-td-error-mix", type=float, default=0.9,
-        help="mean-max TD error mix proportion for priority calculation")
-    parser.add_argument("--clip-grad-norm", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
-        help="whether to clip the gradient norm")
-    parser.add_argument("--max-grad-norm", type=float, default=0.5,
-        help="maximum gradient norm for clipping")
-    
-    # Model hyperparameters
-    args = parser.parse_args()
-    # fmt: on
-    config = R2D2Config(**vars(args))
-    config.env_creator_fn_getter = get_atari_env_creator_fn
-    config.model_loader = atari_model_loader
-    config.lstm_size = 512
-    return config
+    exp_name: str = "r2d2_atari"
+    env_id: str = "PongNoFrameskip-v4"
+    lstm_size_: int = 512
 
 
 if __name__ == "__main__":
-    run_r2d2(parse_r2d2_atari_args())
+    config = pyrallis.parse(config_class=R2D2AtariConfig)
+    config.env_creator_fn_getter = get_atari_env_creator_fn
+    config.model_loader = atari_model_loader
+    run_r2d2(config)

@@ -3,30 +3,29 @@
 import gymnasium as gym
 import numpy as np
 import torch
-from minidrl.r2d2.network import R2D2Network
+from minidrl.r2d2.run_gym import R2D2Network
 
 
 def test_network_init():
     env = gym.make("CartPole-v1")
     obs_space = env.observation_space
     action_space = env.action_space
-    trunk_sizes = [32, 32]
-    lstm_size = 32
-    head_sizes = [32, 32]
 
-    network = R2D2Network(obs_space, action_space, trunk_sizes, lstm_size, head_sizes)
+    network = R2D2Network(obs_space, action_space)
     print(network)
+
+    for m in network.modules():
+        if isinstance(m, torch.nn.LSTM):
+            print(m, m.hidden_size, m.num_layers)
 
 
 def test_network_single():
     env = gym.make("CartPole-v1")
     obs_space = env.observation_space
     action_space = env.action_space
-    trunk_sizes = [32, 32]
-    lstm_size = 32
-    head_sizes = [32, 32]
 
-    network = R2D2Network(obs_space, action_space, trunk_sizes, lstm_size, head_sizes)
+    network = R2D2Network(obs_space, action_space)
+    lstm_size = network.lstm.hidden_size
     obs = env.reset()[0]
     obs = torch.from_numpy(obs).float()
     # Add batch dimension
@@ -51,11 +50,9 @@ def test_network_batch():
     obs_space = envs.single_observation_space
     assert isinstance(obs_space, gym.spaces.Box)
     action_space = envs.single_action_space
-    trunk_sizes = [32, 32]
-    lstm_size = 32
-    head_sizes = [32, 32]
 
-    network = R2D2Network(obs_space, action_space, trunk_sizes, lstm_size, head_sizes)
+    network = R2D2Network(obs_space, action_space)
+    lstm_size = network.lstm.hidden_size
     obs = envs.reset()[0]
     assert obs.shape == (batch_size, *obs_space.shape)
     obs = torch.from_numpy(obs).float()
@@ -81,11 +78,9 @@ def test_network_single_sequence():
     env = gym.make("CartPole-v1")
     obs_space = env.observation_space
     action_space = env.action_space
-    trunk_sizes = [32, 32]
-    lstm_size = 32
-    head_sizes = [32, 32]
 
-    network = R2D2Network(obs_space, action_space, trunk_sizes, lstm_size, head_sizes)
+    network = R2D2Network(obs_space, action_space)
+    lstm_size = network.lstm.hidden_size
     obs = env.reset()[0]
     obs = torch.from_numpy(np.stack([obs] * seq_len)).float()
     obs = obs.view(seq_len, 1, -1)
@@ -110,11 +105,9 @@ def test_network_batch_sequence():
     obs_space = envs.single_observation_space
     assert isinstance(obs_space, gym.spaces.Box)
     action_space = envs.single_action_space
-    trunk_sizes = [32, 32]
-    lstm_size = 32
-    head_sizes = [32, 32]
 
-    network = R2D2Network(obs_space, action_space, trunk_sizes, lstm_size, head_sizes)
+    network = R2D2Network(obs_space, action_space)
+    lstm_size = network.lstm.hidden_size
     obs = envs.reset()[0]
     assert obs.shape == (batch_size, *obs_space.shape)
     obs = torch.from_numpy(np.stack([obs] * seq_len)).float()
@@ -139,11 +132,9 @@ def test_network_single_sequence_reset():
     env = gym.make("CartPole-v1")
     obs_space = env.observation_space
     action_space = env.action_space
-    trunk_sizes = [32, 32]
-    lstm_size = 32
-    head_sizes = [32, 32]
 
-    network = R2D2Network(obs_space, action_space, trunk_sizes, lstm_size, head_sizes)
+    network = R2D2Network(obs_space, action_space)
+    lstm_size = network.lstm.hidden_size
 
     obs = env.reset()[0]
     init_lstm_state = (torch.zeros(1, 1, lstm_size), torch.zeros(1, 1, lstm_size))
@@ -182,9 +173,9 @@ def test_network_single_sequence_reset():
 
 
 if __name__ == "__main__":
-    # test_network_init()
-    # test_network_single()
-    # test_network_batch()
-    # test_network_single_sequence()
-    # test_network_batch_sequence()
+    test_network_init()
+    test_network_single()
+    test_network_batch()
+    test_network_single_sequence()
+    test_network_batch_sequence()
     test_network_single_sequence_reset()

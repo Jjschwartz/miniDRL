@@ -2,17 +2,17 @@
 import time
 
 import torch.multiprocessing as mp
-from minidrl.r2d2.r2d2 import run_actor
+
+from minidrl.r2d2.r2d2 import R2D2Config, run_actor
 from minidrl.r2d2.replay import run_replay_process
-from minidrl.r2d2.utils import R2D2Config
+from minidrl.r2d2.run_gym import get_gym_env_creator_fn, gym_model_loader
 
 
 def test_run_actor():
     """Tests that actor adds to replay correctly."""
     print("\n\ntest_run_actor")
-    env_id = "CartPole-v1"
     config = R2D2Config(
-        env_id=env_id,
+        env_id="CartPole-v1",
         replay_buffer_size=8,
         num_actors=1,
         num_envs_per_actor=1,
@@ -23,11 +23,10 @@ def test_run_actor():
         replay_priority_exponent=0.9,
         replay_priority_noise=1e-3,
         importance_sampling_exponent=0.6,
-        trunk_sizes=[8],
-        lstm_size=8,
-        head_sizes=[8],
         actor_update_interval=int(1e9),  # large to prevent multiple actor updates
     )
+    config.env_creator_fn_getter = get_gym_env_creator_fn
+    config.model_loader = gym_model_loader
 
     model = config.load_model()
 
@@ -100,9 +99,8 @@ def test_run_actor():
 def test_run_multiple_actors():
     """Tests running multiple actors."""
     print("\n\ntest_run_multiple_actors")
-    env_id = "CartPole-v1"
     config = R2D2Config(
-        env_id=env_id,
+        env_id="CartPole-v1",
         replay_buffer_size=8,
         num_actors=2,
         num_envs_per_actor=1,
@@ -113,11 +111,10 @@ def test_run_multiple_actors():
         replay_priority_exponent=0.9,
         replay_priority_noise=1e-3,
         importance_sampling_exponent=0.6,
-        trunk_sizes=[8],
-        lstm_size=8,
-        head_sizes=[8],
         actor_update_interval=int(1e9),  # large to prevent multiple actor updates
     )
+    config.env_creator_fn_getter = get_gym_env_creator_fn
+    config.model_loader = gym_model_loader
 
     model = config.load_model()
 

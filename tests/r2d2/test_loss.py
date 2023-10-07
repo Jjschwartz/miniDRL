@@ -2,9 +2,7 @@
 
 import gymnasium as gym
 import torch
-
-from minidrl.r2d2.r2d2 import compute_loss_and_priority
-from minidrl.r2d2.utils import R2D2Config
+from minidrl.r2d2.r2d2 import R2D2Config, compute_loss_and_priority
 
 
 def test_compute_loss_and_priorities():
@@ -17,7 +15,7 @@ def test_compute_loss_and_priorities():
         seq_len=4,
         burnin_len=2,
     )
-    env = config.make_env()
+    env = gym.make(env_id)
     act_space = env.action_space
     assert isinstance(act_space, gym.spaces.Discrete)
 
@@ -57,9 +55,6 @@ def test_compute_loss_and_priorities_outputs_1step():
         value_rescaling_epsilon=0.1,
         priority_td_error_mix=0.5,
     )
-    env = config.make_env()
-    act_space = env.action_space
-    assert isinstance(act_space, gym.spaces.Discrete)
 
     B = config.num_envs_per_actor
     q_values = torch.tensor(
@@ -99,7 +94,6 @@ def test_compute_loss_and_priorities_outputs_1step():
     # Clamp priorities to avoid NaNs
     priorities = torch.clamp(priorities, min=0.0001)
 
-    print(loss, expected_loss)
     assert torch.allclose(loss, expected_loss)
     assert torch.allclose(priorities, priorities)
 

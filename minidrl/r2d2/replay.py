@@ -1,19 +1,11 @@
 """Prioritized Replay Buffer for R2D2."""
-from __future__ import annotations
-
 import time
-from multiprocessing.queues import Empty
-from typing import TYPE_CHECKING, List, Tuple
+from typing import Union
 
-import gymnasium as gym
 import numpy as np
 import torch
 import torch.multiprocessing as mp
-
-if TYPE_CHECKING:
-    from gymnasium import spaces
-
-    from minidrl.r2d2.utils import R2D2Config
+from gymnasium import spaces
 
 
 class SumTree:
@@ -52,14 +44,14 @@ class SumTree:
         """Total value of the tree."""
         return self.storage[0]
 
-    def get(self, indices: List[int] | torch.Tensor) -> torch.Tensor:
+    def get(self, indices: list[int] | torch.Tensor) -> torch.Tensor:
         """Get values from the tree."""
         if isinstance(indices, list):
             indices = torch.tensor(indices)
         return self.values[indices]
 
     def set(
-        self, indices: List[int] | torch.Tensor, values: List[float] | torch.Tensor
+        self, indices: list[int] | torch.Tensor, values: list[float] | torch.Tensor
     ):
         """Set values in the tree."""
         if isinstance(indices, (list, np.ndarray)):
@@ -75,7 +67,7 @@ class SumTree:
                 )
                 parent = (parent - 1) // 2
 
-    def find(self, targets: List[float] | np.ndarray | torch.tensor) -> List[int]:
+    def find(self, targets: Union[list[float], np.ndarray, torch.tensor]) -> list[int]:
         """Finds smallest indices where `target <` cumulative value sum up to index.
 
         If `target >=` the total value of the tree, the index returned will be the
@@ -138,7 +130,7 @@ class R2D2PrioritizedReplay:
 
     """
 
-    def __init__(self, obs_space: spaces.Box, config: R2D2Config):
+    def __init__(self, obs_space: spaces.Box, config):
         """Initialize."""
         self.config = config
         # capacity = number of sequences
@@ -157,15 +149,6 @@ class R2D2PrioritizedReplay:
         self.lstm_h_storage = torch.zeros((1, C, config.lstm_size), dtype=torch.float32)
         self.lstm_c_storage = torch.zeros((1, C, config.lstm_size), dtype=torch.float32)
 
-        # TODO: figure out if this is necessary
-        # self.obs_storage.share_memory_()
-        # self.action_storage.share_memory_()
-        # self.reward_storage.share_memory_()
-        # self.done_storage.share_memory_()
-        # self.lstm_h_storage.share_memory_()
-        # self.lstm_c_storage.share_memory_()
-        # self.num_added.share_memory_()
-
         self.sum_tree = SumTree(self.capacity)
 
     def add(
@@ -176,12 +159,12 @@ class R2D2PrioritizedReplay:
         dones: torch.tensor,
         lstm_h: torch.tensor,
         lstm_c: torch.tensor,
-        priority: float | np.ndarray | torch.tensor,
+        priority: Union[float, np.ndarray, torch.tensor],
     ):
         """Add a transition to the replay buffer.
 
         T = seq len of the transition (should be equal to self.total_seq_len)
-        B = batch size (generally equal to self.config.num_actors)
+        B = batch size (generally equal to num_envs_per_actor)
         L = num layers in the LSTM (typically 1)
 
         Arguments
@@ -233,7 +216,7 @@ class R2D2PrioritizedReplay:
         priority = [priority] if isinstance(priority, float) else list(priority)
         self.update_priorities(indices, priority)
 
-    def get(self, indices: List[int], device: torch.device) -> Tuple[torch.Tensor, ...]:
+    def get(self, indices: list[int], device: torch.device) -> tuple[torch.Tensor, ...]:
         """Get transitions from the replay buffer.
 
         T = seq len of the transition (should be equal to self.total_seq_len)
@@ -264,7 +247,7 @@ class R2D2PrioritizedReplay:
 
     def sample(
         self, batch_size: int, device: torch.device
-    ) -> Tuple[Tuple[torch.Tensor, ...], List[int], torch.Tensor]:
+    ) -> tuple[tuple[torch.Tensor, ...], list[int], torch.Tensor]:
         """Sample a batch of transitions from the replay buffer.
 
         Arguments
@@ -309,7 +292,7 @@ class R2D2PrioritizedReplay:
         samples = self.get(indices, device=device)
         return samples, indices, weights.to(device)
 
-    def update_priorities(self, indices: List[int], priorities: List[float]):
+    def update_priorities(self, indices: list[int], priorities: list[float]):
         """Update the priorities of transitions in the replay buffer."""
         assert len(indices) == len(priorities)
 
@@ -329,7 +312,7 @@ class R2D2PrioritizedReplay:
 
 
 def run_replay_process(
-    config: R2D2Config,
+    config,
     actor_queue: mp.Queue,
     learner_recv_queue: mp.Queue,
     learner_send_queue: mp.Queue,
@@ -344,7 +327,13 @@ def run_replay_process(
     learner_send_queue : Queue for sending sampled transitions to the learner.
     """
     print("replay: starting.")
-    env = config.make_env()
+
+    # Limit replay to using a single CPU thread.
+    # This prevents replay from using all available cores, which can lead to contention
+    # with actor and learner processes if not enough cores available.
+    torch.set_num_threads(1)
+
+    env = config.env_creator_fn_getter(config, 0, 0)()
     obs_space = env.observation_space
     env.close()
 
@@ -387,7 +376,9 @@ def run_replay_process(
             replay_buffer.add(*actor_queue.get())
 
         if time.time() - last_report_time > 10:
-            print("Replay - size:", replay_buffer.size)
+            print(f"\nReplay - size: {replay_buffer.size}/{replay_buffer.capacity}")
+            print(f"Replay - total added: {replay_buffer.num_added}")
+            print(f"Replay - qsize: {actor_queue.qsize()}/{actor_queue._maxsize}")
             last_report_time = time.time()
 
     print("Replay - exiting.")
