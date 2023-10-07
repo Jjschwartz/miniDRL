@@ -1,5 +1,6 @@
 """Prioritized Replay Buffer for R2D2."""
 import time
+from multiprocessing.queues import Empty
 from typing import Union
 
 import numpy as np
@@ -21,22 +22,14 @@ class SumTree:
     https://github.com/michaelnny/deep_rl_zoo/blob/main/deep_rl_zoo/replay.py#L167
     """
 
-    def __init__(self, capacity: int, storage: torch.Tensor | None = None):
-        """Initialize."""
+    def __init__(self, capacity: int):
         # For capacity=n, the tree has 2n-1 nodes.
         # The first n-1 nodes are non-leaf nodes, with index 0 corresponding to the
         # root node. The children of non-leaf node i are nodes 2i+1 and 2i+2.
         # The last n nodes are leaf nodes, that contain values.
         self.capacity = capacity
         self.first_leaf_idx = capacity - 1
-
-        if storage is None:
-            storage = torch.zeros((2 * capacity - 1,), dtype=torch.float32)
-            # TODO: figure out if this is necessary
-            # storage.share_memory_()
-        else:
-            assert storage.shape == (2 * capacity - 1,)
-        self.storage = storage
+        self.storage = torch.zeros((2 * capacity - 1,), dtype=torch.float32)
         self.values = self.storage[self.first_leaf_idx :]
 
     @property
@@ -316,6 +309,7 @@ def run_replay_process(
     actor_queue: mp.Queue,
     learner_recv_queue: mp.Queue,
     learner_send_queue: mp.Queue,
+    terminate_event: mp.Event,
 ):
     """Run the replay process.
 
@@ -340,12 +334,15 @@ def run_replay_process(
     replay_buffer = R2D2PrioritizedReplay(obs_space, config)
 
     print("replay: waiting for buffer to fill")
-    while replay_buffer.size < config.learning_starts:
-        replay_buffer.add(*actor_queue.get())
+    while replay_buffer.size < config.learning_starts and not terminate_event.is_set():
+        try:  # noqa: SIM105
+            replay_buffer.add(*actor_queue.get(timeout=1))
+        except Empty:
+            pass
 
     print(f"replay: buffer full enough (size={replay_buffer.size}), starting training")
     last_report_time = time.time()
-    while True:
+    while not terminate_event.is_set():
         # Check for learner request, here we prioritize learner requests over actor
         if not learner_recv_queue.empty():
             request = learner_recv_queue.get()
