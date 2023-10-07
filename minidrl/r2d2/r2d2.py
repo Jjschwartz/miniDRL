@@ -80,7 +80,7 @@ class R2D2Config:
     capture_video: bool = False
 
     # Total number of timesteps to train for
-    total_timesteps: int = 10000000
+    total_timesteps: int = 2000000
     # Number of parallel actors to use for collecting trajectories
     num_actors: int = 4
     # Device used by actor models
@@ -117,7 +117,7 @@ class R2D2Config:
     # Adam optimizer epsilon
     adam_eps: float = 1e-3
     # Size of replay buffer before learning starts
-    learning_starts: int = 500
+    learning_starts: int = 1000
     # Target network update interval (in terms of number of updates)
     target_network_update_interval: int = 2500
     # Whether to use value function rescaling or not

@@ -184,16 +184,9 @@ def atari_model_loader(config: R2D2Config):
     return model
 
 
-class R2D2AtariConfig(R2D2Config):
-    """R2D2 atari specific configuration."""
-
-    exp_name: str = "r2d2_atari"
-    env_id: str = "PongNoFrameskip-v4"
-    lstm_size_: int = 512
-
-
 if __name__ == "__main__":
-    config = pyrallis.parse(config_class=R2D2AtariConfig)
+    config = pyrallis.parse(config_class=R2D2Config)
     config.env_creator_fn_getter = get_atari_env_creator_fn
     config.model_loader = atari_model_loader
+    config.lstm_size_ = 512
     run_r2d2(config)
