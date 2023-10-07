@@ -187,12 +187,10 @@ class R2D2GymConfig(R2D2Config):
     # Target network update interval (in terms of number of updates)
     target_network_update_interval: int = 100
 
-    # Size of LSTM hidden state
-    lstm_size_: int = 128
-
 
 if __name__ == "__main__":
     config = pyrallis.parse(config_class=R2D2GymConfig)
     config.env_creator_fn_getter = get_gym_env_creator_fn
     config.model_loader = gym_model_loader
+    config.lstm_size_ = 128
     run_r2d2(config)

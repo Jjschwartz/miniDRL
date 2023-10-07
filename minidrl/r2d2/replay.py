@@ -194,12 +194,12 @@ class R2D2PrioritizedReplay:
             self.lstm_h_storage[:, index:end_idx] = lstm_h[:, :rem_idx]
             self.lstm_c_storage[:, index:end_idx] = lstm_c[:, :rem_idx]
 
-            self.obs_storage[:, :rem_idx] = obs[:, rem_idx:]
-            self.action_storage[:, :rem_idx] = actions[:, rem_idx:]
-            self.reward_storage[:, :rem_idx] = rewards[:, rem_idx:]
-            self.done_storage[:, :rem_idx] = dones[:, rem_idx:]
-            self.lstm_h_storage[:, :rem_idx] = lstm_h[:, rem_idx:]
-            self.lstm_c_storage[:, :rem_idx] = lstm_c[:, rem_idx:]
+            self.obs_storage[:, : batch_size - rem_idx] = obs[:, rem_idx:]
+            self.action_storage[:, : batch_size - rem_idx] = actions[:, rem_idx:]
+            self.reward_storage[:, : batch_size - rem_idx] = rewards[:, rem_idx:]
+            self.done_storage[:, : batch_size - rem_idx] = dones[:, rem_idx:]
+            self.lstm_h_storage[:, : batch_size - rem_idx] = lstm_h[:, rem_idx:]
+            self.lstm_c_storage[:, : batch_size - rem_idx] = lstm_c[:, rem_idx:]
 
             indices = list(range(index, end_idx)) + list(range(0, batch_size - rem_idx))
         else:
@@ -375,7 +375,7 @@ def run_replay_process(
         if not actor_queue.empty():
             replay_buffer.add(*actor_queue.get())
 
-        if time.time() - last_report_time > 10:
+        if time.time() - last_report_time > 60:
             print(f"\nReplay - size: {replay_buffer.size}/{replay_buffer.capacity}")
             print(f"Replay - total added: {replay_buffer.num_added}")
             print(f"Replay - qsize: {actor_queue.qsize()}/{actor_queue._maxsize}")
