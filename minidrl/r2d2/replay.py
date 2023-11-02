@@ -373,6 +373,7 @@ def run_replay_process(
 
     print(f"replay: buffer full enough (size={replay_buffer.size}), starting training")
     last_report_time = time.time()
+    training_start_time = time.time()
     while not terminate_event.is_set():
         # Check for learner request, here we prioritize learner requests over actor
         if not learner_recv_queue.empty():
@@ -397,6 +398,20 @@ def run_replay_process(
             elif request[0] == "get_buffer_size":
                 learner_recv_queue.task_done()
                 learner_send_queue.put(replay_buffer.size)
+            elif request[0] == "get_replay_stats":
+                learner_recv_queue.task_done()
+                seq_per_sec = replay_buffer.num_added / (
+                    time.time() - training_start_time
+                )
+                learner_send_queue.put(
+                    {
+                        "size": replay_buffer.size,
+                        "seqs_added": replay_buffer.num_added,
+                        "steps_added": replay_buffer.num_added * config.seq_len,
+                        "seq_per_sec": seq_per_sec,
+                        "q_size": actor_queue.qsize(),
+                    }
+                )
             else:
                 learner_recv_queue.task_done()
                 raise ValueError(f"Unknown learner request: {request}")
@@ -409,7 +424,8 @@ def run_replay_process(
         if time.time() - last_report_time > 60:
             output = [
                 f"\nreplay - size: {replay_buffer.size}/{replay_buffer.capacity}",
-                f"total added: {replay_buffer.num_added}",
+                f"total seqs added: {replay_buffer.num_added}",
+                f"total steps added: {replay_buffer.num_added * config.seq_len}",
                 f"qsize: {actor_queue.qsize()}/{actor_queue._maxsize}",
             ]
             print("\n  ".join(output))

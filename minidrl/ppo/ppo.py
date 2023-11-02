@@ -743,7 +743,6 @@ def run_ppo(config: PPOConfig):
                         }
                     )
                     uploaded_video_files.add(filename)
-                    break
 
     env.close()
     writer.close()

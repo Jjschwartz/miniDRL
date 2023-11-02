@@ -17,7 +17,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
-from multiprocessing.queues import Empty
+from multiprocessing.queues import Empty, Full
 from typing import Optional
 
 import gymnasium as gym
@@ -498,16 +498,14 @@ def run_actor(
     )
 
     step = 0
-    current_seq_len = 0
+    current_seq_len, num_episodes_completed = 0, 0
+    # buffer for storing last 100 episodes returns
     episode_returns = np.zeros(100, dtype=np.float32)
     episode_lengths = np.zeros(100, dtype=np.int64)
-    num_episodes_completed = 0
     start_time = time.time()
-    # main loop - runs until learner sends end signal
+    # main loop
     while not terminate_event.is_set():
         if step % config.actor_update_interval == 0:
-            # request latest model parameters from learner
-            # print(f"actor={actor_idx} - t={step}: Updating actor model.")
             learner_send_queue.put(("get_latest_params", actor_idx))
             while not terminate_event.is_set():
                 try:
@@ -585,7 +583,7 @@ def run_actor(
                         timeout=1,  # timeout after 1 second, to check for terminate
                     )
                     break
-                except Empty:
+                except Full:
                     pass
 
             # reset sequence buffers, keeping the last burnin + seq_len / 2 steps
@@ -607,6 +605,8 @@ def run_actor(
             # add lstm state to queue for next sequence
             lstm_state_queue.append(lstm_state)
 
+        step += 1
+
         if actor_idx == config.num_actors - 1:
             # accumulate and send results to learner
             # only send from last actor since it has smallest exploration epsilon
@@ -625,7 +625,7 @@ def run_actor(
                 ep_returns = episode_returns[:num_episodes_completed]
                 ep_lengths = episode_lengths[:num_episodes_completed]
                 results = {
-                    "actor_steps": step,
+                    "actor_steps": step * config.num_envs_per_actor,
                     "actor_sps": sps,
                     "mean_episode_returns": ep_returns.mean().item(),
                     "max_episode_returns": ep_returns.max().item(),
@@ -634,8 +634,6 @@ def run_actor(
                     "actor_episodes_completed": num_episodes_completed,
                 }
                 learner_send_queue.put(("send_results", results))
-
-        step += 1
 
     print(f"actor={actor_idx} - t={step} terminate signal recieved.")
     envs.close()
@@ -695,6 +693,7 @@ def run_learner(
         "|param|value|\n|-|-|\n%s"
         % ("\n".join([f"|{key}|{value}|" for key, value in vars(config).items()])),
     )
+    uploaded_video_files = set()
 
     # model setup
     device = config.device
@@ -721,7 +720,7 @@ def run_learner(
 
     def run_param_sync_thread():
         """Runs a thread that synchronizes parameters between learner and actors."""
-        print("param_sync_thread: started")
+        print("learner: param_sync_thread - started")
         while not end_training_event.is_set() and not termination_event.is_set():
             try:
                 # set timeout so that we can check if training is done
@@ -753,7 +752,7 @@ def run_learner(
             except Empty:
                 pass
 
-        print("param_sync_thread: done")
+        print("learner: param_sync_thread - done")
 
     param_sync_thread = threading.Thread(target=run_param_sync_thread)
     param_sync_thread.start()
@@ -906,6 +905,28 @@ def run_learner(
         writer.add_scalar("times/learning_time", learning_time, global_step)
         writer.add_scalar("times/update_time", update_time, global_step)
 
+        if update % 100 == 0:
+            replay_send_queue.put(("get_replay_stats", None))
+            while not termination_event.is_set():
+                try:
+                    replay_stats = replay_recv_queue.get(timeout=1)
+                    replay_recv_queue.task_done()
+
+                    for key, value in replay_stats.items():
+                        writer.add_scalar(f"replay/{key}", value, global_step)
+
+                    result_output = [f"\nlearner: replay stats (step={global_step})"]
+                    for key, value in replay_stats.items():
+                        # log to stdout
+                        if isinstance(value, float):
+                            result_output.append(f"{key}={value:0.4f}")
+                        else:
+                            result_output.append(f"{key}={value}")
+                    print("\n  ".join(result_output))
+                    break
+                except Empty:
+                    pass
+
         if config.save_interval > 0 and update % config.save_interval == 0:
             print("Saving model")
             torch.save(
@@ -918,6 +939,25 @@ def run_learner(
                 },
                 os.path.join(config.log_dir, f"checkpoint_{global_step}.pt"),
             )
+
+        if config.capture_video and config.track_wandb:
+            video_filenames = [
+                fname
+                for fname in os.listdir(config.video_dir)
+                if fname.endswith(".mp4") and fname not in uploaded_video_files
+            ]
+            if video_filenames:
+                print(f"Uploading {len(video_filenames)} videos")
+                video_filenames.sort()
+                for filename in video_filenames:
+                    wandb.log(  # type:ignore
+                        {
+                            "video": wandb.Video(  # type:ignore
+                                os.path.join(config.video_dir, filename)
+                            )
+                        }
+                    )
+                    uploaded_video_files.add(filename)
 
     if termination_event.is_set():
         print("learner: Training terminated early due to error.")

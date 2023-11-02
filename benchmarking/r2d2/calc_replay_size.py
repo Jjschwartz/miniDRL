@@ -5,7 +5,6 @@ import gymnasium as gym
 import numpy as np
 import torch
 from gymnasium import spaces
-
 from minidrl.common.atari_wrappers import (
     ClipRewardEnv,
     EpisodicLifeEnv,
@@ -93,16 +92,21 @@ def calculate_replay_size(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--env_id", type=str, default="CartPole-v1")
-    parser.add_argument("--atari", action="store_true", default=False)
-    parser.add_argument("--buffer_size", type=int, default=100000)
-    parser.add_argument("--seq_len", type=int, default=80)
-    parser.add_argument("--burnin_len", type=int, default=40)
-    parser.add_argument("--lstm_size", type=int, default=512)
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument("--env_id", type=str, default="CartPole-v1", help="...")
+    parser.add_argument("--atari", action="store_true", default=False, help="...")
+    parser.add_argument("--buffer_size", type=int, default=100000, help="...")
+    parser.add_argument("--seq_len", type=int, default=80, help="...")
+    parser.add_argument("--burnin_len", type=int, default=40, help="...")
+    parser.add_argument("--lstm_size", type=int, default=512, help="...")
     args = parser.parse_args()
 
-    env = make_atari_env(args.env_id) if args.atari else gym.make(args.env_id)
+    if args.atari and args.env_id == "CartPole-v1":
+        env = make_atari_env("PongNoFrameskip-v4")
+    else:
+        env = make_atari_env(args.env_id) if args.atari else gym.make(args.env_id)
     calculate_replay_size(
         env.observation_space,
         args.buffer_size,
