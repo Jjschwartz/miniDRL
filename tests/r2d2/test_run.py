@@ -1,7 +1,6 @@
 """Tests for R2D2 main function."""
 import os
 
-import torch
 from minidrl.r2d2.r2d2 import R2D2Config, run_r2d2
 from minidrl.r2d2.run_gym import get_gym_env_creator_fn, gym_model_loader
 
@@ -81,9 +80,5 @@ def test_run_r2d2_multi_actor():
 
 
 if __name__ == "__main__":
-    # limit threads per actor to 1
-    os.environ["OMP_NUM_THREADS"] = "1"
-    torch.set_num_threads(1)
-    torch.set_num_interop_threads(1)
     test_run_r2d2_single_actor()
     test_run_r2d2_multi_actor()

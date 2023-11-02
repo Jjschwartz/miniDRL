@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from minidrl.r2d2.r2d2 import R2D2Config, run_r2d2
+from minidrl.r2d2.r2d2 import R2D2Config, R2D2Network, run_r2d2
 
 
 def get_gym_env_creator_fn(
@@ -41,7 +41,7 @@ def layer_init(layer: nn.Module, std: float = np.sqrt(2), bias_const: float = 0.
     return layer
 
 
-class R2D2Network(nn.Module):
+class R2D2GymNetwork(R2D2Network):
     """Main Neural Network class for R2D2.
 
     Has a Dueling DQN architecture with an LSTM layer. This includes a shared linear
@@ -91,26 +91,6 @@ class R2D2Network(nn.Module):
         )
 
     def forward(self, o, a, r, done, lstm_state):
-        """Get q-values for each action given inputs.
-
-        T = seq_len
-        B = batch_size (i.e. num parallel envs)
-
-        Arguments
-        ---------
-        o: The time `t` observation: o_t. Shape=(T, B, *obs_shape).
-        a: The previous (`t-1`) action: a_tm1. Shape=(T, B).
-        r: The previous (`t-1`) reward: r_tm1. Shape=(T, B).
-        done: Whether the episode is ended on last `t-1` step: d_tm1. Shape=(T, B).
-        lstm_state: The previous state of the LSTM. This is a tuple with two entries,
-            each of which has shape=(lstm.num_layers, B, lstm_size).
-
-        Returns
-        -------
-        q: The q-values for each action for time `t`: q_t. Shape=(T, B, action_space.n).
-        lstm_state: The new state of the LSTM, shape=(lstm.num_layers, B, lstm_size).
-
-        """
         T, B, *_ = o.shape
         # merge batch and time dimensions, new shape=(T*B, *obs_shape)
         o = torch.flatten(o, 0, 1)
@@ -164,7 +144,7 @@ def gym_model_loader(config: R2D2Config):
     env = config.env_creator_fn_getter(config, env_idx=0, actor_idx=None)()
     obs_space = env.observation_space
     act_space = env.action_space
-    model = R2D2Network(obs_space, act_space)
+    model = R2D2GymNetwork(obs_space, act_space)
     env.close()
     return model
 

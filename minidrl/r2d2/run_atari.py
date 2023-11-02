@@ -15,7 +15,7 @@ from minidrl.common.atari_wrappers import (
     MaxAndSkipEnv,
     NoopResetEnv,
 )
-from minidrl.r2d2.r2d2 import R2D2Config, run_r2d2
+from minidrl.r2d2.r2d2 import R2D2Config, R2D2Network, run_r2d2
 
 
 def quadratic_episode_trigger(x: int) -> bool:
@@ -71,7 +71,7 @@ def layer_init(
     return layer
 
 
-class R2D2AtariNetwork(nn.Module):
+class R2D2AtariNetwork(R2D2Network):
     """CNN based network for R2D2 on atari.
 
     Has a Dueling DQN architecture with an LSTM layer.
@@ -123,10 +123,6 @@ class R2D2AtariNetwork(nn.Module):
         )
 
     def forward(self, o, a, r, done, lstm_state):
-        """Get q-values for each action given inputs.
-
-        See porl.r2d2.r2d2.R2D2Network.forward for more details.
-        """
         T, B, *_ = o.shape
         # merge batch and time dimensions, new shape=(T*B, *obs_shape)
         o = torch.flatten(o, 0, 1)

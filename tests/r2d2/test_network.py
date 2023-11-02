@@ -3,7 +3,7 @@
 import gymnasium as gym
 import numpy as np
 import torch
-from minidrl.r2d2.run_gym import R2D2Network
+from minidrl.r2d2.run_gym import R2D2GymNetwork
 
 
 def test_network_init():
@@ -11,7 +11,7 @@ def test_network_init():
     obs_space = env.observation_space
     action_space = env.action_space
 
-    network = R2D2Network(obs_space, action_space)
+    network = R2D2GymNetwork(obs_space, action_space)
     print(network)
 
     for m in network.modules():
@@ -24,7 +24,7 @@ def test_network_single():
     obs_space = env.observation_space
     action_space = env.action_space
 
-    network = R2D2Network(obs_space, action_space)
+    network = R2D2GymNetwork(obs_space, action_space)
     lstm_size = network.lstm.hidden_size
     obs = env.reset()[0]
     obs = torch.from_numpy(obs).float()
@@ -51,7 +51,7 @@ def test_network_batch():
     assert isinstance(obs_space, gym.spaces.Box)
     action_space = envs.single_action_space
 
-    network = R2D2Network(obs_space, action_space)
+    network = R2D2GymNetwork(obs_space, action_space)
     lstm_size = network.lstm.hidden_size
     obs = envs.reset()[0]
     assert obs.shape == (batch_size, *obs_space.shape)
@@ -79,7 +79,7 @@ def test_network_single_sequence():
     obs_space = env.observation_space
     action_space = env.action_space
 
-    network = R2D2Network(obs_space, action_space)
+    network = R2D2GymNetwork(obs_space, action_space)
     lstm_size = network.lstm.hidden_size
     obs = env.reset()[0]
     obs = torch.from_numpy(np.stack([obs] * seq_len)).float()
@@ -106,7 +106,7 @@ def test_network_batch_sequence():
     assert isinstance(obs_space, gym.spaces.Box)
     action_space = envs.single_action_space
 
-    network = R2D2Network(obs_space, action_space)
+    network = R2D2GymNetwork(obs_space, action_space)
     lstm_size = network.lstm.hidden_size
     obs = envs.reset()[0]
     assert obs.shape == (batch_size, *obs_space.shape)
@@ -133,7 +133,7 @@ def test_network_single_sequence_reset():
     obs_space = env.observation_space
     action_space = env.action_space
 
-    network = R2D2Network(obs_space, action_space)
+    network = R2D2GymNetwork(obs_space, action_space)
     lstm_size = network.lstm.hidden_size
 
     obs = env.reset()[0]

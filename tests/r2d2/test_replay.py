@@ -293,17 +293,18 @@ def test_r2d2_distributed_replay():
     assert isinstance(obs_space, gym.spaces.Box)
 
     mp_ctxt = mp.get_context("spawn")
-
-    actor_queue = mp_ctxt.SimpleQueue()
-    learner_recv_queue = mp_ctxt.SimpleQueue()
-    learner_send_queue = mp_ctxt.SimpleQueue()
+    terminate_event = mp_ctxt.Event()
+    actor_replay_queue = mp_ctxt.JoinableQueue()
+    learner_recv_queue = mp_ctxt.JoinableQueue()
+    learner_send_queue = mp_ctxt.JoinableQueue()
     replay_process = mp_ctxt.Process(
         target=run_replay_process,
         args=(
             config,
-            actor_queue,
+            actor_replay_queue,
             learner_send_queue,
             learner_recv_queue,
+            terminate_event,
         ),
     )
     replay_process.start()
@@ -317,7 +318,7 @@ def test_r2d2_distributed_replay():
             rng, env, T, B, config.lstm_size
         )
         priority = np.ones((B,))
-        actor_queue.put(
+        actor_replay_queue.put(
             (
                 obs,
                 actions,
@@ -332,6 +333,7 @@ def test_r2d2_distributed_replay():
     # Get batch of transitions
     learner_send_queue.put(("sample", B))
     samples, indices, weights = learner_recv_queue.get()
+    learner_recv_queue.task_done()
 
     assert samples[0].shape == (T, B, *obs_space.shape)
     assert samples[1].shape == (T, B)
@@ -345,15 +347,17 @@ def test_r2d2_distributed_replay():
     updated_priorities = np.random.rand(B).tolist()
     learner_send_queue.put(("update_priorities", indices, updated_priorities))
 
-    # Close replay process
-    learner_send_queue.put(("terminate", None))
-
     # delete any shared memory references, so shutdown happens correctly
-    del samples
-    del weights
+    del samples, indices, weights
+
+    # Close replay process
+    terminate_event.set()
+
+    learner_send_queue.join()
+    actor_replay_queue.join()
 
     replay_process.join()
-    actor_queue.close()
+    actor_replay_queue.close()
     learner_send_queue.close()
     learner_recv_queue.close()
 

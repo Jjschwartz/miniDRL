@@ -6,16 +6,17 @@ https://openreview.net/pdf?id=r1lyTjAqYX.
 Also with details from the Ape-X paper "Distributed Prioritized Experience Replay"
 https://arxiv.org/abs/1803.00933
 
+Reference implementations:
 https://github.com/michaelnny/deep_rl_zoo/tree/main
 
-TODO
-- [ ] Zero out prev action and reward for first step in episode?
 """
+import math
 import os
 import random
 import threading
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import timedelta
 from multiprocessing.queues import Empty
 from typing import Optional
 
@@ -24,10 +25,55 @@ import numpy as np
 import torch
 import torch.multiprocessing as mp
 import torch.optim as optim
+from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
 from minidrl.config import BASE_RESULTS_DIR
 from minidrl.r2d2.replay import run_replay_process
+
+
+class R2D2Network(nn.Module):
+    """Abstract Neural Network class for R2D2.
+
+    All R2D2 networks should inherit from this class or at least implement it's
+    interface (i.e. the `forward` method).
+    """
+
+    def forward(
+        self,
+        o: torch.tensor,
+        a: torch.tensor,
+        r: torch.tensor,
+        done: torch.tensor,
+        lstm_state: tuple[torch.tensor, : torch.tensor],
+    ):
+        """Get q-values for each action given inputs.
+
+        T = seq_len
+        B = batch_size (i.e. num parallel envs)
+
+        Arguments
+        ---------
+        o
+            The time `t` observation: o_t. Shape=(T, B, *obs_shape).
+        a
+            The previous (`t-1`) action: a_tm1. Shape=(T, B).
+        r
+            The previous (`t-1`) reward: r_tm1. Shape=(T, B).
+        done
+            Whether the episode is ended on last `t-1` step: d_tm1. Shape=(T, B).
+        lstm_state
+            The previous state of the LSTM. This is a tuple with two entries, each of
+            which has shape=(lstm.num_layers, B, lstm_size).
+
+        Returns
+        -------
+        q
+            Q-values for each action for time `t`: q_t. Shape=(T, B, action_space.n).
+        lstm_state
+            The new state of the LSTM, shape=(lstm.num_layers, B, lstm_size).
+        """
+        raise NotImplementedError
 
 
 @dataclass
@@ -77,6 +123,9 @@ class R2D2Config:
     capture_video: bool = False
 
     # Total number of timesteps to train for
+    # This is the total number of steps/transitions/frames used to update the model,
+    # not the number of steps taken in the environment by the actors.
+    # Note each update will use `batch_size * seq_len` steps.
     total_timesteps: int = 2000000
     # Number of parallel actors to use for collecting trajectories
     num_actors: int = 4
@@ -86,20 +135,23 @@ class R2D2Config:
     num_envs_per_actor: int = 16
     # Number of environment steps between updating actor parameters
     actor_update_interval: int = 400
-    # base epsilon for actor epsilon-greedy exploration
+    # Base epsilon for actor epsilon-greedy exploration
+    # Each actor has a different epsilon value for exploration. See `get_actor_epsilon`
+    # for details.
     actor_base_epsilon: float = 0.05
 
-    # Length of sequences stored and sampled from the replay buffer
+    # Length of sequences used for learning that are stored and sampled from the replay
+    # buffer
     seq_len: int = 80
     # Length of burn-in sequence for each training sequence
     burnin_len: int = 40
-    # Size of replay buffer (i.e. number of sequences)
+    # Size of replay buffer in terms of number of sequences
     replay_buffer_size: int = 100000
     # Exponent for replay priority
     replay_priority_exponent: float = 0.9
     # Prioritized replay noise
     replay_priority_noise: float = 1e-3
-    # Exponent for importance sampling
+    # Exponent for replay importance sampling
     importance_sampling_exponent: float = 0.6
     # Mean-max TD error mix proportion for priority calculation
     priority_td_error_mix: float = 0.9
@@ -115,7 +167,7 @@ class R2D2Config:
     adam_eps: float = 1e-3
     # Size of replay buffer before learning starts
     learning_starts: int = 1000
-    # Target network update interval (in terms of number of updates)
+    # Target network update interval (in terms of number of learner updates)
     target_network_update_interval: int = 2500
     # Whether to use value function rescaling or not
     value_rescaling: bool = True
@@ -174,9 +226,9 @@ class R2D2Config:
         )
 
     @property
-    def total_num_envs(self) -> int:
-        """Total number of environments."""
-        return self.num_envs_per_actor * self.num_actors
+    def num_updates(self) -> int:
+        """Number of updates to perform."""
+        return math.ceil(self.total_timesteps / (self.batch_size * self.seq_len))
 
     @property
     def lstm_size(self) -> int:
@@ -196,14 +248,14 @@ class R2D2Config:
 
         return self.lstm_size_
 
-    def load_model(self):
+    def load_model(self) -> R2D2Network:
         """Load the model."""
         return self.model_loader(self)
 
     def get_actor_epsilon(self, actor_idx: int) -> float:
         """Get the epsilon for the actor with index `actor_idx`.
 
-        Similar to the Ape-X paper each actor is assigned a different epsilon value
+        Similar to the Ape-X paper, each actor is assigned a different epsilon value
         for exploration. Specifically, actor i in [0, num_actors) has an epsilon of:
 
             epsilon_i = base_epsilon * (1 - i / num_actors)
@@ -237,17 +289,25 @@ def compute_loss_and_priority(
 
     Arguments
     ---------
-    config : Configuration for R2D2.
-    q_values : Predicted Q values for step `t`: q_t. Shape (T+1, B, A)
-    actions : Actual actions taken at step `t-1`: a_tm1 Shape (T+1, B)
-    rewards : Rewards received on step `t-1`: r_tm1. Shape (T+1, B)
-    dones : Whether the episode terminated on step `t-1`: d_tm1. Shape (T+1, B)
-    target_q_values : Target Q values for step `t`: q_target_t. Shape (T+1, B, A)
+    config
+        Configuration for R2D2.
+    q_values
+        Predicted Q values for step `t`: q_t. Shape (T+1, B, A)
+    actions
+        Actual actions taken at step `t-1`: a_tm1 Shape (T+1, B)
+    rewards
+        Rewards received on step `t-1`: r_tm1. Shape (T+1, B)
+    dones
+        Whether the episode terminated on step `t-1`: d_tm1. Shape (T+1, B)
+    target_q_values
+        Target Q values for step `t`: q_target_t. Shape (T+1, B, A)
 
     Returns
     -------
-    loss : The loss for each transition sequence. Shape (B,)
-    priorities : The priority for each transition sequence. Shape (B,)
+    loss
+        The loss for each transition sequence. Shape (B,)
+    priorities
+        The priority for each transition sequence. Shape (B,)
 
     """
     # Get the Q value for the action taken at each step. Shape (T, B)
@@ -277,7 +337,7 @@ def compute_loss_and_priority(
         )
 
     # Calculate n-step TD target. Shape (T, B)
-    # [sum_{k=0}^{n-1} gamma^k * r_{t+k}] + [gamma^n * Q_target(o_{t+n}, a*)]
+    # = [sum_{k=0}^{n-1} gamma^k * r_{t+k}] + [gamma^n * Q_target(o_{t+n}, a*)]
     # where a* = argmax_a Q(o_{t+n}, a)
 
     # Get rewards, dones, target Q values into shape (T + n, B)
@@ -338,20 +398,30 @@ def compute_loss_and_priority(
 def run_actor(
     actor_idx: int,
     config: R2D2Config,
-    replay_queue: mp.Queue,
-    learner_send_queue: mp.Queue,
-    learner_recv_queue: mp.Queue,
+    replay_queue: mp.JoinableQueue,
+    learner_send_queue: mp.JoinableQueue,
+    learner_recv_queue: mp.JoinableQueue,
     terminate_event: mp.Event,
 ):
-    """Run an R2D2 actor process that collects trajectories and sends them to replay.
+    """Run an R2D2 actor process.
+
+    Each R2D2 process collects trajectories and sends them to replay while periodically
+    requesting the latest model parameters from the learner.
 
     Arguments
     ---------
-    actor_idx : The index of the actor.
-    config : Configuration for R2D2.
-    replay_queue : Queue for sending trajectories to replay.
-    learner_send_queue : Queue for sending results and parameter requests to learner.
-    learner_recv_queue : Queue for receiving parameters and other signals from learner.
+    actor_idx
+        The index of the actor.
+    config
+        Configuration for R2D2.
+    replay_queue
+        Queue for sending trajectories to replay.
+    learner_send_queue
+        Queue for sending results and parameter requests to learner.
+    learner_recv_queue
+        Queue for receiving parameters from learner.
+    terminate_event
+        Event for signaling termination of run.
     """
     print(f"actor={actor_idx}: Actor started.")
 
@@ -367,7 +437,6 @@ def run_actor(
     device = config.actor_device
 
     print(f"actor={actor_idx}: {device=} {epsilon=:.4f}.")
-    print(f"actor={actor_idx}")
 
     # env setup
     # Note: SyncVectorEnv runs multiple-env instances serially.
@@ -442,10 +511,11 @@ def run_actor(
             learner_send_queue.put(("get_latest_params", actor_idx))
             while not terminate_event.is_set():
                 try:
-                    result = learner_recv_queue.get(block=True, timeout=1)
+                    result = learner_recv_queue.get(timeout=1)
                     assert result[0] == "params"
                     actor_model.load_state_dict(result[1])
                     del result  # free reference
+                    learner_recv_queue.task_done()
                     break
                 except Empty:
                     pass
@@ -567,23 +637,43 @@ def run_actor(
 
         step += 1
 
+    print(f"actor={actor_idx} - t={step} terminate signal recieved.")
     envs.close()
 
-    # wait for queue to empty
-    while not replay_queue.empty():
-        time.sleep(1)
+    print(f"actor={actor_idx} - t={step}: Waiting for shared resources to be released.")
+    replay_queue.join()
+    learner_send_queue.join()
 
     print(f"actor={actor_idx} - t={step}: Actor Finished.")
 
 
 def run_learner(
     config: R2D2Config,
-    replay_send_queue: mp.Queue,
-    replay_recv_queue: mp.Queue,
-    actor_recv_queue: mp.Queue,
-    actor_send_queues: list[mp.Queue],
+    replay_send_queue: mp.JoinableQueue,
+    replay_recv_queue: mp.JoinableQueue,
+    actor_recv_queue: mp.JoinableQueue,
+    actor_send_queues: list[mp.JoinableQueue],
     termination_event: mp.Event,
 ):
+    """Run the R2D2 learner process.
+
+    The learner process samples trajectories from replay and updates the model.
+
+    Arguments
+    ---------
+    config
+        Configuration for R2D2.
+    replay_send_queue
+        Queue for sending requests to the replay.
+    replay_rec_queue
+        Queue for recieving trajectories from the replay.
+    actor_recv_queue
+        Queue for receiving results and requests for parameters from actors.
+    actor_send_queues
+        Queues (one for each actor) for sending parameters to each actor.
+    termination_event
+        Event for signaling termination of run.
+    """
     # Logging setup
     # Do this after workers are spawned to avoid log duplication
     if config.track_wandb:
@@ -637,6 +727,7 @@ def run_learner(
                 # set timeout so that we can check if training is done
                 request = actor_recv_queue.get(timeout=1)
                 if request[0] == "get_latest_params":
+                    actor_recv_queue.task_done()
                     with parameter_lock:
                         model_state = {
                             k: v.cpu() for k, v in model.state_dict().items()
@@ -653,9 +744,11 @@ def run_learner(
                         if isinstance(value, float):
                             result_output.append(f"{key}={value:0.4f}")
                         else:
-                            result_output.append(f"learner: {key}={value}")
+                            result_output.append(f"{key}={value}")
                     print("\n  ".join(result_output))
+                    actor_recv_queue.task_done()
                 else:
+                    actor_recv_queue.task_done()
                     raise ValueError(f"Unknown request {request}")
             except Empty:
                 pass
@@ -671,6 +764,7 @@ def run_learner(
     while not termination_event.is_set():
         try:
             buffer_size = replay_recv_queue.get(timeout=1)
+            replay_recv_queue.task_done()
             assert buffer_size >= config.learning_starts
             break
         except Empty:
@@ -678,26 +772,28 @@ def run_learner(
 
     # Training loop
     print("learner: Starting training loop...")
-    start_time = time.time()
-    # placeholders for samples, so we can release them later
-    samples, indices, weights = torch.empty(0), torch.empty(0), torch.empty(0)
-    obs, actions, rewards, dones, lstm_h, lstm_c = None, None, None, None, None, None
-    while global_step < config.total_timesteps and not termination_event.is_set():
-        step_start_time = time.time()
+    train_start_time, last_report_time = time.time(), time.time()
+    update = 1
+    while update < config.num_updates + 1 and not termination_event.is_set():
+        update_start_time = time.time()
         # samples: (T, B, ...), indices: (B,), weights: (B,)
         replay_send_queue.put(("sample", config.batch_size))
+        batch = None
         while not termination_event.is_set():
             try:
-                samples, indices, weights = replay_recv_queue.get(timeout=1)
+                batch = replay_recv_queue.get(timeout=1)
                 break
             except Empty:
                 pass
         if termination_event.is_set():
+            if batch is not None:
+                del batch
+                replay_recv_queue.task_done()
             break
-        sample_time = time.time() - step_start_time
 
-        # unpack samples: o_t, a_t, r_t, d_t, lsmt_h_0, lstm_c_0
-        obs, actions, rewards, dones, lstm_h, lstm_c = samples
+        sample_time = time.time() - update_start_time
+
+        (obs, actions, rewards, dones, lstm_h, lstm_c), indices, weights = batch
         target_lstm_c, target_lstm_h = lstm_c.clone(), lstm_h.clone()
 
         burnin_time_start = time.time()
@@ -722,7 +818,6 @@ def run_learner(
 
         # compute loss and gradients and update parameters
         learning_start_time = time.time()
-        optimizer.zero_grad()
 
         q_values, _ = model.forward(
             obs[config.burnin_len :],
@@ -752,6 +847,7 @@ def run_learner(
         loss = torch.mean(loss * weights.detach())
 
         with parameter_lock:
+            optimizer.zero_grad()
             loss.backward()
             if config.clip_grad_norm:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
@@ -759,27 +855,39 @@ def run_learner(
 
         learning_time = time.time() - learning_start_time
 
-        # update priorities
         replay_send_queue.put(("update_priorities", indices, priorities.tolist()))
 
-        if global_step > 1 and global_step % config.target_network_update_interval == 0:
-            print(f"\nlearner: {global_step=} - updating target network.")
+        # release shared memory references
+        del obs, actions, rewards, dones, lstm_h, lstm_c, indices, weights, batch
+        replay_recv_queue.task_done()
+
+        if update > 1 and update % config.target_network_update_interval == 0:
+            print(f"\nlearner: {global_step=} {update=} - updating target network.")
             target_model.load_state_dict(model.state_dict())
 
+        update_time = time.time() - update_start_time
+
         # log metrics
-        step_time = time.time() - step_start_time
-        ups = global_step / (time.time() - start_time)
-        sps = int(global_step * config.batch_size * config.seq_len) / (
-            time.time() - start_time
-        )
+        update += 1
+        global_step += config.batch_size * config.seq_len
+        ups = update / (time.time() - train_start_time)
+        sps = global_step / (time.time() - train_start_time)
         q_max = torch.mean(torch.max(q_values, dim=-1)[0])
 
-        if global_step > 0 and global_step % config.actor_update_interval == 0:
+        if time.time() - last_report_time > 5:
             # periodically log to stdout
-            print(f"\nlearner: {global_step=}")
-            print(f"learner: loss={loss.item():0.6f}")
-            print(f"learner: q_max={q_max.item():0.6f}")
-            print(f"learner: UPS={ups:.2f}")
+            training_time = timedelta(seconds=int(time.time() - train_start_time))
+            output = "\n".join(
+                [
+                    f"\nlearner: time={training_time} {update=} {global_step=}",
+                    f"  loss={loss.item():0.6f}",
+                    f"  q_max={q_max.item():0.6f}",
+                    f"  UPS={ups:.1f}",
+                    f"  SPS={sps:.1f}",
+                ]
+            )
+            print(output)
+            last_report_time = time.time()
 
         writer.add_scalar(
             "losses/learning_rate", optimizer.param_groups[0]["lr"], global_step
@@ -796,29 +904,27 @@ def run_learner(
         writer.add_scalar("times/sample_time", sample_time, global_step)
         writer.add_scalar("times/burnin_time", burnin_time, global_step)
         writer.add_scalar("times/learning_time", learning_time, global_step)
-        writer.add_scalar("times/total_step_time", step_time, global_step)
+        writer.add_scalar("times/update_time", update_time, global_step)
 
-        if (
-            config.save_interval > 0
-            and global_step > 0
-            and global_step % config.save_interval == 0
-        ):
+        if config.save_interval > 0 and update % config.save_interval == 0:
             print("Saving model")
             torch.save(
                 {
                     "model": model.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "global_step": global_step,
+                    "update": update,
                     "config": asdict(config),
                 },
                 os.path.join(config.log_dir, f"checkpoint_{global_step}.pt"),
             )
 
-        global_step += 1
-
     if termination_event.is_set():
         print("learner: Training terminated early due to error.")
     else:
+        # set termination event so replay and actor processes know to stop
+        # and to signal to main that learner finished as expected
+        termination_event.set()
         print("learner: Training complete.")
 
     print("learner: Shutting down parameter synchronization thread.")
@@ -827,8 +933,10 @@ def run_learner(
 
     writer.close()
 
-    del samples, indices, weights
-    del obs, actions, rewards, dones, lstm_h, lstm_c
+    print("learner: waiting for shared resources to be released")
+    replay_send_queue.join()
+    for q in actor_send_queues:
+        q.join()
 
     print("learner: All done.")
 
@@ -836,9 +944,14 @@ def run_learner(
 def run_r2d2(config: R2D2Config):
     """Run R2D2.
 
-    This function spawns the replay, actor, and learner processes, and setting up
-    communication between them. It also handles cleanup after training is finished,
-    or in the event of an error occurs on any of the processes.
+    This function spawns the replay, actor, and learner processes, and sets up
+    communication between them. It also handles cleanup after training is finished
+    or in the event an error occurs on any of the processes.
+
+    Arguments
+    ---------
+    config
+        Configuration for R2D2.
 
     """
     # seeding
@@ -848,7 +961,7 @@ def run_r2d2(config: R2D2Config):
     torch.backends.cudnn.deterministic = config.torch_deterministic
 
     print("Running R2D2:")
-    print(f"Env-id: {config.env_id}")
+    print(f"Env ID: {config.env_id}")
 
     print("main: spawning replay, actor, and learner processes.")
     # `fork` not supported by CUDA
@@ -860,11 +973,11 @@ def run_r2d2(config: R2D2Config):
     terminate_event = mp_ctxt.Event()
 
     # create queues for communication between learner, actors, and replay
-    actor_replay_queue = mp_ctxt.Queue(maxsize=100)
-    actor_recv_queue = mp_ctxt.Queue()
-    actor_send_queues = [mp_ctxt.Queue() for _ in range(config.num_actors)]
-    replay_send_queue = mp_ctxt.Queue()
-    replay_recv_queue = mp_ctxt.Queue()
+    actor_replay_queue = mp_ctxt.JoinableQueue(maxsize=100)
+    actor_recv_queue = mp_ctxt.JoinableQueue()
+    actor_send_queues = [mp_ctxt.JoinableQueue() for _ in range(config.num_actors)]
+    replay_send_queue = mp_ctxt.JoinableQueue()
+    replay_recv_queue = mp_ctxt.JoinableQueue()
 
     print("main: Spawning replay process.")
     replay_process = mp_ctxt.Process(
@@ -914,36 +1027,41 @@ def run_r2d2(config: R2D2Config):
     actor_crashed = False
     while not actor_crashed:
         time.sleep(1)
-        if not replay_process.is_alive():
-            print("Replay process crashed.")
-            break
         if not learner.is_alive():
-            print("Learner process finished.")
+            if terminate_event.is_set():
+                print("main: Learner process finished training.")
+            else:
+                print("main: Learner process crashed.")
+            break
+        if not replay_process.is_alive():
+            print("main: Replay process crashed.")
             break
         for i, actor in enumerate(actors):
             if not actor.is_alive():
-                print(f"Actor {i} process crashed.")
+                print(f"main: Actor {i} process crashed.")
                 actor_crashed = True
 
     print("main: Training finished, shutting down.")
-    terminate_event.set()
+    if not terminate_event.is_set():
+        terminate_event.set()
 
-    print("main: Joining replay process.")
-    replay_process.join()
+    # give time for processes to close and stop adding to queues
+    time.sleep(2)
 
-    print("main: Draining replay and actor queues.")
-    for q in (
+    print("main: Draining and closing replay and actor queues.")
+    for q in [
         actor_replay_queue,
         replay_send_queue,
         replay_recv_queue,
         actor_recv_queue,
-    ):
+    ] + actor_send_queues:
         while not q.empty():
             q.get()
+            q.task_done()
+        q.close()
 
-    for q in actor_send_queues:
-        while not q.empty():
-            q.get()
+    print("main: Joining replay process.")
+    replay_process.join()
 
     print("main: Joining actors.")
     for i in range(config.num_actors):
@@ -953,12 +1071,4 @@ def run_r2d2(config: R2D2Config):
     learner.join()
 
     print("main: Replay, actor and learner processes successfully joined.")
-    print("main: Cleaning up communication queues.")
-    actor_replay_queue.close()
-    replay_send_queue.close()
-    replay_recv_queue.close()
-    actor_recv_queue.close()
-    for i in range(config.num_actors):
-        actor_send_queues[i].close()
-
     print("main: All done")

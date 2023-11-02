@@ -47,9 +47,9 @@ class SumTree:
         self, indices: list[int] | torch.Tensor, values: list[float] | torch.Tensor
     ):
         """Set values in the tree."""
-        if isinstance(indices, (list, np.ndarray)):
+        if isinstance(indices, (list)):
             indices = torch.tensor(indices)
-        if isinstance(values, (list, np.ndarray)):
+        if isinstance(values, (list)):
             values = torch.tensor(values, dtype=torch.float32)
         self.values[indices] = values
         for i in indices + self.capacity:
@@ -68,13 +68,14 @@ class SumTree:
 
         Arguments
         ---------
-        targets : The target values to search for.
+        targets
+            The target values to search for.
 
         Returns
         -------
-        indices : For each target, the smallest index such that target is strictly less
-            than the cumulative sum of values up to and including that index.
-
+        indices
+            For each target, the smallest index such that target is strictly less than
+            the cumulative sum of values up to and including that index.
         """
         indices = []
         for target in targets:
@@ -120,7 +121,6 @@ class R2D2PrioritizedReplay:
     `t`, we store sequences of length T+1, where T is the burn-in + sequence length.
 
     Actors send transitions to the replay buffer via a shared queue.
-
     """
 
     def __init__(self, obs_space: spaces.Box, config):
@@ -162,14 +162,20 @@ class R2D2PrioritizedReplay:
 
         Arguments
         ---------
-        obs : The observations. Shape=(T+1, B, *obs_space.shape)
-        actions : The actions. Shape=(T+1, B)
-        rewards : The rewards. Shape=(T+1, B)
-        dones : The done flags. Shape=(T+1, B)
-        lstm_h : The LSTM hidden state. Shape=(L, B, lstm_size)
-        lstm_c : The LSTM cell state. Shape=(L, B, lstm_size)
-        priority : The priority of the transition. Shape=(B,)
-
+        obs
+            The observations. Shape=(T+1, B, *obs_space.shape)
+        actions
+            The actions. Shape=(T+1, B)
+        rewards
+            The rewards. Shape=(T+1, B)
+        dones
+            The done flags. Shape=(T+1, B)
+        lstm_h
+            The LSTM hidden state. Shape=(L, B, lstm_size)
+        lstm_c
+            The LSTM cell state. Shape=(L, B, lstm_size)
+        priority
+            The priority of the transition. Shape=(B,)
         """
         assert obs.shape[0] == self.total_seq_len
 
@@ -217,17 +223,25 @@ class R2D2PrioritizedReplay:
 
         Arguments
         ---------
-        indices : Indices into storage for the transitions to get.
-        device : The device to put the tensors on.
+        indices
+            Indices into storage for the transitions to get.
+        device
+            The device to put the tensors on.
 
         Returns
         -------
-        obs : The observations. Shape=(T+1, len(indices), *obs_space.shape)
-        actions : The actions. Shape=(T+1, len(indices))
-        rewards : The rewards. Shape=(T+1, len(indices))
-        done : The done flags. Shape=(T+1, len(indices))
-        lstm_h : The LSTM hidden state. Shape=(L, len(indices), lstm_size)
-        lstm_c : The LSTM cell state. Shape=(L, len(indices), lstm_size)
+        obs
+            The observations. Shape=(T+1, len(indices), *obs_space.shape)
+        actions
+            The actions. Shape=(T+1, len(indices))
+        rewards
+            The rewards. Shape=(T+1, len(indices))
+        done
+            The done flags. Shape=(T+1, len(indices))
+        lstm_h
+            The LSTM hidden state. Shape=(L, len(indices), lstm_size)
+        lstm_c
+            The LSTM cell state. Shape=(L, len(indices), lstm_size)
         """
         return (
             self.obs_storage[:, indices].to(device),
@@ -245,22 +259,24 @@ class R2D2PrioritizedReplay:
 
         Arguments
         ---------
-        batch_size : Number of transitions to sample.
-        device : Device to put the tensors on.
+        batch_size
+            Number of transitions to sample.
+        device
+            Device to put the sampled tensors on.
 
         Returns
         -------
-        samples : The sampled batch of transitions.
-        indices : Indices of the sampled transitions in the replay buffer.
-        weights : Importance sampling weights for the batch.
+        samples
+            The sampled batch of transitions.
+        indices
+            Indices of the sampled transitions in the replay buffer.
+        weights
+            Importance sampling weights for the batch.
         """
         assert batch_size > 0
         assert self.size >= batch_size
 
         # sample indices according to priorities
-        indices = []
-        priorities = []
-
         targets = np.random.uniform(0, self.sum_tree.total, size=batch_size)
         indices = self.sum_tree.find(targets)
         priorities = self.sum_tree.get(indices)
@@ -286,7 +302,15 @@ class R2D2PrioritizedReplay:
         return samples, indices, weights.to(device)
 
     def update_priorities(self, indices: list[int], priorities: list[float]):
-        """Update the priorities of transitions in the replay buffer."""
+        """Update the priorities of transitions in the replay buffer.
+
+        Arguments
+        ---------
+        indices
+            The indices of the transitions to update.
+        priorities
+            The new priorities of the transitions.
+        """
         assert len(indices) == len(priorities)
 
         # By default 0 ** 0 is 1 but we never want indices with priority zero to be
@@ -306,19 +330,25 @@ class R2D2PrioritizedReplay:
 
 def run_replay_process(
     config,
-    actor_queue: mp.Queue,
-    learner_recv_queue: mp.Queue,
-    learner_send_queue: mp.Queue,
+    actor_queue: mp.JoinableQueue,
+    learner_recv_queue: mp.JoinableQueue,
+    learner_send_queue: mp.JoinableQueue,
     terminate_event: mp.Event,
 ):
     """Run the replay process.
 
     Arguments
     ---------
-    config : R2D2 configuration.
-    actor_queue : Queue for receiving transitions from actors.
-    learner_recieve_queue : Queue for receiving requests from the learner.
-    learner_send_queue : Queue for sending sampled transitions to the learner.
+    config
+        R2D2 configuration.
+    actor_queue
+        Queue for receiving transitions from actors.
+    learner_recieve_queue
+        Queue for receiving requests from the learner.
+    learner_send_queue
+        Queue for sending sampled transitions to the learner.
+    terminate_event
+        Event for signaling terminating of the run.
     """
     print("replay: starting.")
 
@@ -337,6 +367,7 @@ def run_replay_process(
     while replay_buffer.size < config.learning_starts and not terminate_event.is_set():
         try:  # noqa: SIM105
             replay_buffer.add(*actor_queue.get(timeout=1))
+            actor_queue.task_done()
         except Empty:
             pass
 
@@ -350,10 +381,8 @@ def run_replay_process(
                 "Bad learner request to replay. Requests must be tuples, with the "
                 f"first element being a string. Got: {request}"
             )
-            if request[0] == "terminate":
-                print("Replay - exit signal recieved.")
-                break
-            elif request[0] == "sample":
+            if request[0] == "sample":
+                learner_recv_queue.task_done()
                 # sample a batch of transitions and send to learner
                 batch_size = request[1]
                 samples, indices, weights = replay_buffer.sample(
@@ -361,21 +390,33 @@ def run_replay_process(
                 )
                 learner_send_queue.put((samples, indices, weights))
             elif request[0] == "update_priorities":
-                indices, priorities = request[1:]
-                replay_buffer.update_priorities(indices, priorities)
+                replay_buffer.update_priorities(*request[1:])
+                # free references to shared memory resources
+                del request
+                learner_recv_queue.task_done()
             elif request[0] == "get_buffer_size":
+                learner_recv_queue.task_done()
                 learner_send_queue.put(replay_buffer.size)
             else:
+                learner_recv_queue.task_done()
                 raise ValueError(f"Unknown learner request: {request}")
 
         # Receive transition from actors
         if not actor_queue.empty():
             replay_buffer.add(*actor_queue.get())
+            actor_queue.task_done()
 
         if time.time() - last_report_time > 60:
-            print(f"\nReplay - size: {replay_buffer.size}/{replay_buffer.capacity}")
-            print(f"Replay - total added: {replay_buffer.num_added}")
-            print(f"Replay - qsize: {actor_queue.qsize()}/{actor_queue._maxsize}")
+            output = [
+                f"\nreplay - size: {replay_buffer.size}/{replay_buffer.capacity}",
+                f"total added: {replay_buffer.num_added}",
+                f"qsize: {actor_queue.qsize()}/{actor_queue._maxsize}",
+            ]
+            print("\n  ".join(output))
             last_report_time = time.time()
+
+    print("replay - terminate signal recieved.")
+    print("replay - waiting for shared resources to be released.")
+    learner_send_queue.join()
 
     print("Replay - exiting.")
