@@ -898,6 +898,7 @@ def run_learner(
         )
         writer.add_scalar("losses/max_priorities", priorities.max().item(), global_step)
         writer.add_scalar("losses/min_priorities", priorities.min().item(), global_step)
+        writer.add_scalar("times/update", update, global_step)
         writer.add_scalar("times/learner_SPS", sps, global_step)
         writer.add_scalar("times/learner_UPS", ups, global_step)
         writer.add_scalar("times/sample_time", sample_time, global_step)
@@ -905,7 +906,8 @@ def run_learner(
         writer.add_scalar("times/learning_time", learning_time, global_step)
         writer.add_scalar("times/update_time", update_time, global_step)
 
-        if update % 100 == 0:
+        # log replay stats (making sure to log after first update)
+        if update == 2 or update % 100 == 0:
             replay_send_queue.put(("get_replay_stats", None))
             while not termination_event.is_set():
                 try:
@@ -915,7 +917,9 @@ def run_learner(
                     for key, value in replay_stats.items():
                         writer.add_scalar(f"replay/{key}", value, global_step)
 
-                    result_output = [f"\nlearner: replay stats (step={global_step})"]
+                    result_output = [
+                        f"\nlearner: replay stats (step={global_step} update={update})"
+                    ]
                     for key, value in replay_stats.items():
                         # log to stdout
                         if isinstance(value, float):
