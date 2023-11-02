@@ -88,8 +88,8 @@ NUM_ACTORS = [1, 2, 4, 8, 16, 32]
 NUM_ENVS_PER_ACTOR = [1, 2, 4, 8, 16, 32, 64, 128, 256]
 
 # smaller exp
-NUM_ACTORS = [1, 2]
-NUM_ENVS_PER_ACTOR = [1, 2, 4]
+SMALL_NUM_ACTORS = [1, 2]
+SMALL_NUM_ENVS_PER_ACTOR = [1, 2, 4]
 
 
 def run_r2d2_benchmarking(
@@ -151,11 +151,18 @@ if __name__ == "__main__":
         default=500,
         help="Number of learner updates to run each benchmark experiment for.",
     )
+    parser.add_argument(
+        "--small_run",
+        action="store_true",
+        help="Run smaller benchmark experiments.",
+    )
     args = parser.parse_args()
 
     run_r2d2_benchmarking(
         num_updates=args.num_updates,
-        num_actors=NUM_ACTORS,
-        num_envs_per_actor=NUM_ENVS_PER_ACTOR,
+        num_actors=SMALL_NUM_ACTORS if args.small_run else NUM_ACTORS,
+        num_envs_per_actor=(
+            SMALL_NUM_ENVS_PER_ACTOR if args.small_run else NUM_ENVS_PER_ACTOR
+        ),
         config_params=ATARI_CONFIG if args.atari else CARTPOLE_CONFIG,
     )
