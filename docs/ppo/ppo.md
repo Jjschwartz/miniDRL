@@ -56,7 +56,7 @@ python minidrl/ppo/run_atari.py --env_id PongNoFrameskip-v4
 
 ## Explanation of logged metrics
 
-Running the miniDRL PPO implementaion will automatically record various metrics such as losses and mean episode returns in Tensorboard. Below some information for these metrics:
+Running the miniDRL PPO implementaion will automatically record various metrics such as losses and mean episode returns in [Tensorboard](https://www.tensorflow.org/tensorboard) (and optionally [WandB](https://wandb.ai/)). Below is some information for these metrics:
 
 - `charts/global_step`: the current training step
 - `charts/update`: the number of policy updates performed

@@ -374,6 +374,7 @@ def run_replay_process(
     print(f"replay: buffer full enough (size={replay_buffer.size}), starting training")
     last_report_time = time.time()
     training_start_time = time.time()
+    num_sampled_seqs = 0
     while not terminate_event.is_set():
         # Check for learner request, here we prioritize learner requests over actor
         if not learner_recv_queue.empty():
@@ -390,6 +391,7 @@ def run_replay_process(
                     batch_size, config.device
                 )
                 learner_send_queue.put((samples, indices, weights))
+                num_sampled_seqs += batch_size
             elif request[0] == "update_priorities":
                 replay_buffer.update_priorities(*request[1:])
                 # free references to shared memory resources
@@ -400,7 +402,10 @@ def run_replay_process(
                 learner_send_queue.put(replay_buffer.size)
             elif request[0] == "get_replay_stats":
                 learner_recv_queue.task_done()
-                seq_per_sec = replay_buffer.num_added / (
+                added_seq_per_sec = replay_buffer.num_added / (
+                    time.time() - training_start_time
+                )
+                sampled_seq_per_sec = num_sampled_seqs / (
                     time.time() - training_start_time
                 )
                 learner_send_queue.put(
@@ -408,7 +413,10 @@ def run_replay_process(
                         "size": replay_buffer.size,
                         "seqs_added": replay_buffer.num_added,
                         "steps_added": replay_buffer.num_added * config.seq_len,
-                        "seq_per_sec": seq_per_sec,
+                        "seqs_sampled": num_sampled_seqs,
+                        "replay_ratio": num_sampled_seqs / replay_buffer.num_added,
+                        "added_seq_per_sec": added_seq_per_sec,
+                        "sampled_seq_per_sec": sampled_seq_per_sec,
                         "q_size": actor_queue.qsize(),
                     }
                 )

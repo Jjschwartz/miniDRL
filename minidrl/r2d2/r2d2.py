@@ -607,9 +607,10 @@ def run_actor(
 
         step += 1
 
-        if actor_idx == config.num_actors - 1:
+        if actor_idx == 0:
             # accumulate and send results to learner
-            # only send from last actor since it has smallest exploration epsilon
+            # only send from first actor since it will have the same exploration epsilon
+            # irrespective of the number of actors
             for item in [
                 i
                 for i in info.get("final_info", [])
@@ -856,7 +857,11 @@ def run_learner(
             optimizer.zero_grad()
             loss.backward()
             if config.clip_grad_norm:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+                unclipped_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), config.max_grad_norm
+                )
+            else:
+                unclipped_grad_norm = None
             optimizer.step()
 
         learning_time = time.time() - learning_start_time
@@ -905,13 +910,17 @@ def run_learner(
         )
         writer.add_scalar("losses/max_priorities", priorities.max().item(), global_step)
         writer.add_scalar("losses/min_priorities", priorities.min().item(), global_step)
-        writer.add_scalar("times/update", update, global_step)
-        writer.add_scalar("times/learner_SPS", sps, global_step)
-        writer.add_scalar("times/learner_UPS", ups, global_step)
-        writer.add_scalar("times/sample_time", sample_time, global_step)
-        writer.add_scalar("times/burnin_time", burnin_time, global_step)
-        writer.add_scalar("times/learning_time", learning_time, global_step)
-        writer.add_scalar("times/update_time", update_time, global_step)
+        if unclipped_grad_norm is not None:
+            writer.add_scalar(
+                "losses/unclipped_grad_norm", unclipped_grad_norm.item(), global_step
+            )
+        writer.add_scalar("charts/update", update, global_step)
+        writer.add_scalar("charts/learner_SPS", sps, global_step)
+        writer.add_scalar("charts/learner_UPS", ups, global_step)
+        writer.add_scalar("charts/sample_time", sample_time, global_step)
+        writer.add_scalar("charts/burnin_time", burnin_time, global_step)
+        writer.add_scalar("charts/learning_time", learning_time, global_step)
+        writer.add_scalar("charts/update_time", update_time, global_step)
 
         # log replay stats (making sure to log after first update)
         if update == 2 or update % 100 == 0:

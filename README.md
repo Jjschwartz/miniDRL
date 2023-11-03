@@ -60,9 +60,11 @@ This repository contains standalone implementations of some of the main distribu
 
 ### R2D2
 
-**Coming Soon**
+[Paper](https://openreview.net/forum?id=r1lyTjAqYX) | [code](https://github.com/Jjschwartz/miniDRL/tree/main/minidrl/r2d2) | [docs](https://github.com/Jjschwartz/miniDRL/blob/main/docs/r2d2/r2d2.md)
 
-[Paper](https://openreview.net/forum?id=r1lyTjAqYX) | [code](https://github.com/Jjschwartz/miniDRL/tree/main/minidrl/r2d2) | [docs]()
-
-
-
+<!---
+# uncomment and update figure link when R2D2 is implemented
+|![Learning Curve by wall time vs num actor](docs/ppo/figures/pong_vs_num_workers_wall_time.svg)|
+|:--:|
+|*Learning curve of R2D2 - Single Machine on Atari Pong with different number of parallel actors*|
+-->
