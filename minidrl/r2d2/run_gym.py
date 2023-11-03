@@ -1,4 +1,6 @@
 """Run R2D2 on classic gym environments."""
+from dataclasses import dataclass
+
 import gymnasium as gym
 import numpy as np
 import pyrallis
@@ -149,6 +151,7 @@ def gym_model_loader(config: R2D2Config):
     return model
 
 
+@dataclass
 class R2D2GymConfig(R2D2Config):
     """R2D2 gym specific configuration."""
 
@@ -163,7 +166,7 @@ class R2D2GymConfig(R2D2Config):
     # Size of replay buffer (i.e. number of sequences)
     replay_buffer_size: int = 10000
     # Size of replay buffer before learning starts
-    learning_starts: int = 1000
+    learning_starts: int = 500
     # Target network update interval (in terms of number of updates)
     target_network_update_interval: int = 100
 

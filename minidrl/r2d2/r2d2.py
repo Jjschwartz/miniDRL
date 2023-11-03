@@ -76,12 +76,12 @@ class R2D2Network(nn.Module):
         raise NotImplementedError
 
 
-@dataclass
+@dataclass(kw_only=True)
 class R2D2Config:
     """Configuration for R2D2 algorithm.
 
     Note, the `env_creator_fn_getter` and `model_loader` attributes must be set after
-    initialization:
+    initialization (this is to be compatible with pyrallis).):
 
     ```python
     config = R2D2Config()
@@ -627,6 +627,7 @@ def run_actor(
                 results = {
                     "actor_steps": step * config.num_envs_per_actor,
                     "actor_sps": sps,
+                    "estimated_total_actor_sps": sps * config.num_actors,
                     "mean_episode_returns": ep_returns.mean().item(),
                     "max_episode_returns": ep_returns.max().item(),
                     "min_episode_returns": ep_returns.min().item(),
@@ -672,6 +673,12 @@ def run_learner(
     termination_event
         Event for signaling termination of run.
     """
+
+    # Limit learner to using a single CPU thread.
+    # This prevents learner from using all available cores, which can lead to contention
+    # with actor and replay processes.
+    torch.set_num_threads(1)
+
     # Logging setup
     # Do this after workers are spawned to avoid log duplication
     if config.track_wandb:
@@ -1068,24 +1075,26 @@ def run_r2d2(config: R2D2Config):
     learner.start()
 
     print("main: Waiting for replay, actor, and learner processes to finish.")
-    actor_crashed = False
-    while not actor_crashed:
+    while (
+        not terminate_event.is_set()
+        and learner.is_alive()
+        and replay_process.is_alive()
+        and all(a.is_alive() for a in actors)
+    ):
         time.sleep(1)
-        if not learner.is_alive():
-            if terminate_event.is_set():
-                print("main: Learner process finished training.")
-            else:
-                print("main: Learner process crashed.")
-            break
-        if not replay_process.is_alive():
-            print("main: Replay process crashed.")
-            break
+
+    print("main: Training ended, shutting down.")
+    if terminate_event.is_set():
+        print("main: Learner process finished training as expected.")
+    elif not learner.is_alive():
+        print("main: Learner process crashed.")
+    elif not replay_process.is_alive():
+        print("main: Replay process crashed.")
+    else:
         for i, actor in enumerate(actors):
             if not actor.is_alive():
                 print(f"main: Actor {i} process crashed.")
-                actor_crashed = True
 
-    print("main: Training finished, shutting down.")
     if not terminate_event.is_set():
         terminate_event.set()
 

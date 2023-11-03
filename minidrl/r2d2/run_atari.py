@@ -1,6 +1,4 @@
 """Run R2D2 on atari environments."""
-import math
-
 import gymnasium as gym
 import numpy as np
 import pyrallis
@@ -18,12 +16,6 @@ from minidrl.common.atari_wrappers import (
 from minidrl.r2d2.r2d2 import R2D2Config, R2D2Network, run_r2d2
 
 
-def quadratic_episode_trigger(x: int) -> bool:
-    """Quadratic episode trigger."""
-    sqrt_x = math.sqrt(x)
-    return x >= 1000 or int(sqrt_x) - sqrt_x == 0
-
-
 def get_atari_env_creator_fn(
     config: R2D2Config, env_idx: int, actor_idx: int | None = None
 ):
@@ -35,9 +27,7 @@ def get_atari_env_creator_fn(
         env = gym.make(config.env_id, render_mode=render_mode)
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if capture_video:
-            env = gym.wrappers.RecordVideo(
-                env, config.video_dir, episode_trigger=quadratic_episode_trigger
-            )
+            env = gym.wrappers.RecordVideo(env, config.video_dir)
 
         # Atari specific wrappers
         # https://github.com/vwxyzjn/cleanrl/blob/master/cleanrl/ppo_atari_lstm.py
