@@ -37,14 +37,18 @@ For all options, run:
 """
 import argparse
 import gc
+import math
 import time
 from itertools import product
 
+import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
 import torch
+
 from minidrl.r2d2.r2d2 import R2D2Config, run_r2d2
 from minidrl.r2d2.run_atari import atari_model_loader, get_atari_env_creator_fn
 from minidrl.r2d2.run_gym import get_gym_env_creator_fn, gym_model_loader
-
 
 CARTPOLE_CONFIG = {
     "config_kwargs": {
@@ -52,7 +56,8 @@ CARTPOLE_CONFIG = {
         "seed": 0,
         "torch_deterministic": True,
         "cuda": True,
-        "track_wandb": True,
+        # "track_wandb": True,
+        "track_wandb": False,
         "env_id": "CartPole-v1",
         "seq_len": 10,
         "burnin_len": 0,
@@ -70,7 +75,8 @@ ATARI_CONFIG = {
         "seed": 0,
         "torch_deterministic": True,
         "cuda": True,
-        "track_wandb": True,
+        # "track_wandb": True,
+        "track_wandb": False,
         "env_id": "PongNoFrameskip-v4",
         "seq_len": 80,
         "burnin_len": 40,
@@ -138,9 +144,93 @@ def run_r2d2_benchmarking(
     print("Benchmarking experiments finished")
 
 
+def plot_results(results_file: str):
+    """Plot the results."""
+    df = pd.read_csv(results_file)
+
+    columns = df.columns.to_list()
+    sorted_columns = sorted(columns)
+    for c in sorted_columns:
+        print(c)
+
+    num_crashed = df["State"].value_counts()["crashed"]
+    if num_crashed > 0:
+        print(
+            f"WARNING: {num_crashed} experiments crashed. These will be filtered out."
+        )
+        df = df[df["State"] != "crashed"]
+
+    sns.set_theme()
+
+    # first plot results for single actor with different number of envs per worker
+    df_single_actor = df[(df["num_actors"] == 1)]
+    df_single_actor.sort_values(by=["num_envs_per_actor"], inplace=True, ascending=True)
+
+    y_keys = [
+        "actor/actor_sps",
+        "replay/seq_per_sec",
+        "replay/q_size",
+        "replay/size",
+        "replay/seqs_added",
+        "times/learner_UPS",
+        "times/burnin_time",
+        "times/learning_time",
+        "times/sample_time",
+        "times/update_time",
+    ]
+    if len(y_keys) > 3:
+        nrows, ncols = math.ceil(len(y_keys) / 3), 3
+    else:
+        nrows, ncols = 1, len(y_keys)
+
+    print(f"Plotting {nrows} x {ncols} plots")
+
+    fig, axs = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        squeeze=False,
+        sharex=False,
+        sharey=False,
+        figsize=(6, 6),
+    )
+
+    print(df_single_actor["num_envs_per_actor"])
+    for i, y in enumerate(y_keys):
+        if len(y_keys) > 3:
+            row, col = i // 3, i % 3
+        else:
+            row, col = 0, i
+        ax = axs[row][col]
+
+        print(f"Plotting {y}")
+        print(df_single_actor[y])
+        ax.plot(
+            df_single_actor["num_envs_per_actor"],
+            df_single_actor[y],
+        )
+
+        # ax.set_yscale("log", base=2)
+        ax.set_ylabel(f"{y}")
+        # ax.set_xscale("log", base=2)
+        ax.set_xlabel("Num Envs Per Actor")
+
+    fig.tight_layout()
+    plt.show()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument(
+        "action",
+        type=str,
+        choices=["run", "plot"],
+        help=(
+            "Action to perform. "
+            "`run` - run benchmark experiments. "
+            "`plot` - plot results. "
+        ),
     )
     parser.add_argument(
         "--atari", action="store_true", help="Run benchmarking on Atari environment."
@@ -156,13 +246,23 @@ if __name__ == "__main__":
         action="store_true",
         help="Run smaller benchmark experiments.",
     )
+    parser.add_argument(
+        "--results_file",
+        type=str,
+        default=None,
+        help="Path to csv results file (required if plotting).",
+    )
     args = parser.parse_args()
 
-    run_r2d2_benchmarking(
-        num_updates=args.num_updates,
-        num_actors=SMALL_NUM_ACTORS if args.small_run else NUM_ACTORS,
-        num_envs_per_actor=(
-            SMALL_NUM_ENVS_PER_ACTOR if args.small_run else NUM_ENVS_PER_ACTOR
-        ),
-        config_params=ATARI_CONFIG if args.atari else CARTPOLE_CONFIG,
-    )
+    if args.action == "run":
+        run_r2d2_benchmarking(
+            num_updates=args.num_updates,
+            num_actors=SMALL_NUM_ACTORS if args.small_run else NUM_ACTORS,
+            num_envs_per_actor=(
+                SMALL_NUM_ENVS_PER_ACTOR if args.small_run else NUM_ENVS_PER_ACTOR
+            ),
+            config_params=ATARI_CONFIG if args.atari else CARTPOLE_CONFIG,
+        )
+    else:
+        assert args.results_file is not None, "results_file is required for plotting"
+        plot_results(args.results_file)

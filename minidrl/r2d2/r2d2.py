@@ -139,6 +139,8 @@ class R2D2Config:
     # Each actor has a different epsilon value for exploration. See `get_actor_epsilon`
     # for details.
     actor_base_epsilon: float = 0.05
+    # Actor exploration alpha hyperparameter. See `get_actor_epsilon` for details.
+    actor_alpha: float = 7.0
 
     # Length of sequences used for learning that are stored and sampled from the replay
     # buffer
@@ -176,7 +178,7 @@ class R2D2Config:
     # Whether to clip the gradient norm
     clip_grad_norm: bool = True
     # Maximum gradient norm
-    max_grad_norm: float = 0.5
+    max_grad_norm: float = 40.0
 
     # Size of LSTM hidden state
     # Should be set based on model being used or will attempt to be inferred from
@@ -255,20 +257,38 @@ class R2D2Config:
     def get_actor_epsilon(self, actor_idx: int) -> float:
         """Get the epsilon for the actor with index `actor_idx`.
 
-        Similar to the Ape-X paper, each actor is assigned a different epsilon value
-        for exploration. Specifically, actor i in [0, num_actors) has an epsilon of:
+        As per the Ape-X paper, each actor is assigned a different epsilon value
+        for exploration. Specifically, actor i in [0, num_actors-1] has an epsilon of:
 
-            epsilon_i = base_epsilon * (1 - i / num_actors)
+            epsilon_i = base_epsilon ** (1 + i / (num_actors-1) * alpha)
 
-        This is different from the original paper where the epsilon is:
-
-            epsilon_i = base_epsilon ** (1 + i / num_actors * alpha)
-
-        The original paper's epsilon schedule doesn't work as well when the number of
-        actors is low (it assigns very low epsilon valus to all actors).
+        Where `base_epsilon` and `alpha` are hyperparameters, set to  0.4 and 7 by
+        default (same as Ape-X and R2D2 paper).
 
         """
-        return self.actor_base_epsilon * (1 - actor_idx / self.num_actors)
+        if self.num_actors < 4:
+            # If using less than 4 actors, the default function leads to quite high and low
+            # epsilons for the low number of actors.
+            # So we pretend we have 16 actors, and select the epsilons for the actors
+            # from intervals in the middle of the 16 actor epsilons.
+            epsilons = np.power(
+                self.actor_base_epsilon, 1 + np.arange(16) / (16 - 1) * self.actor_alpha
+            )
+            return epsilons[(actor_idx + 1) * 16 // (self.num_actors + 3)]
+        return self.actor_base_epsilon ** (
+            1 + (actor_idx / (self.num_actors - 1)) * self.actor_alpha
+        )
+
+    def is_reporting_actor(self, actor_idx: int) -> bool:
+        """Whether the actor with index `actor_idx` should report results.
+
+        The actor with exploration epsilon closest to 0.05 will report results. This is
+        so that the results are not biased by the exploration epsilon. When comparing
+        results across different runs with varying number of actors.
+        """
+        epsilons = [self.get_actor_epsilon(i) for i in range(self.num_actors)]
+        closest_idx = np.argmin(np.abs(np.array(epsilons) - 0.05))
+        return closest_idx == actor_idx
 
 
 def compute_loss_and_priority(
@@ -434,6 +454,7 @@ def run_actor(
     np_rng = np.random.RandomState(actor_idx)
 
     epsilon = config.get_actor_epsilon(actor_idx)
+    is_reporting_actor = config.is_reporting_actor(actor_idx)
     device = config.actor_device
 
     print(f"actor={actor_idx}: {device=} {epsilon=:.4f}.")
@@ -607,7 +628,7 @@ def run_actor(
 
         step += 1
 
-        if actor_idx == 0:
+        if is_reporting_actor:
             # accumulate and send results to learner
             # only send from first actor since it will have the same exploration epsilon
             # irrespective of the number of actors

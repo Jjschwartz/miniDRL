@@ -56,10 +56,10 @@ import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.optim as optim
-
 from minidrl.ppo.ppo import PPOConfig, run_rollout_worker
 from minidrl.ppo.run_atari import atari_model_loader, get_atari_env_creator_fn
 from minidrl.ppo.run_gym import get_gym_env_creator_fn, gym_model_loader
+
 
 CARTPOLE_CONFIG = {
     "config_kwargs": {
@@ -712,7 +712,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--append-results", action="store_true")
     parser.add_argument(
-        "--save-file",
+        "--save_file",
         type=str,
         default=None,
         help=(
