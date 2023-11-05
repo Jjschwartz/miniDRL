@@ -45,10 +45,10 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 import torch
-
 from minidrl.r2d2.r2d2 import R2D2Config, run_r2d2
 from minidrl.r2d2.run_atari import atari_model_loader, get_atari_env_creator_fn
 from minidrl.r2d2.run_gym import get_gym_env_creator_fn, gym_model_loader
+
 
 CARTPOLE_CONFIG = {
     "config_kwargs": {
@@ -119,7 +119,7 @@ def run_r2d2_benchmarking(
         print(
             f"Running exp_num={exp_num}, "
             f"num_actors={na}, "
-            f"num_envs_per_actor={na}, "
+            f"num_envs_per_actor={ne}, "
             f"for {total_timesteps} steps"
         )
         config = R2D2Config(

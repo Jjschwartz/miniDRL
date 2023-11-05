@@ -364,6 +364,8 @@ def run_replay_process(
     replay_buffer = R2D2PrioritizedReplay(obs_space, config)
 
     print("replay: waiting for buffer to fill")
+    last_report_time = time.time()
+    start_time = time.time()
     while replay_buffer.size < config.learning_starts and not terminate_event.is_set():
         try:  # noqa: SIM105
             replay_buffer.add(*actor_queue.get(timeout=1))
@@ -372,9 +374,8 @@ def run_replay_process(
             pass
 
     print(f"replay: buffer full enough (size={replay_buffer.size}), starting training")
-    last_report_time = time.time()
+    num_sampled_seqs, num_batches_added, num_batches_sampled = 0, 0, 0
     training_start_time = time.time()
-    num_sampled_seqs = 0
     while not terminate_event.is_set():
         # Check for learner request, here we prioritize learner requests over actor
         if not learner_recv_queue.empty():
@@ -392,6 +393,8 @@ def run_replay_process(
                 )
                 learner_send_queue.put((samples, indices, weights))
                 num_sampled_seqs += batch_size
+                num_batches_sampled += 1
+
             elif request[0] == "update_priorities":
                 replay_buffer.update_priorities(*request[1:])
                 # free references to shared memory resources
@@ -402,12 +405,8 @@ def run_replay_process(
                 learner_send_queue.put(replay_buffer.size)
             elif request[0] == "get_replay_stats":
                 learner_recv_queue.task_done()
-                added_seq_per_sec = replay_buffer.num_added / (
-                    time.time() - training_start_time
-                )
-                sampled_seq_per_sec = num_sampled_seqs / (
-                    time.time() - training_start_time
-                )
+                time_running = time.time() - start_time
+                training_time = time.time() - training_start_time
                 learner_send_queue.put(
                     {
                         "size": replay_buffer.size,
@@ -415,8 +414,10 @@ def run_replay_process(
                         "steps_added": replay_buffer.num_added * config.seq_len,
                         "seqs_sampled": num_sampled_seqs,
                         "replay_ratio": num_sampled_seqs / replay_buffer.num_added,
-                        "added_seq_per_sec": added_seq_per_sec,
-                        "sampled_seq_per_sec": sampled_seq_per_sec,
+                        "added_seq_per_sec": replay_buffer.num_added / time_running,
+                        "added_batch_per_sec": num_batches_added / time_running,
+                        "sampled_seq_per_sec": num_sampled_seqs / training_time,
+                        "sampled_batch_per_sec": num_batches_sampled / training_time,
                         "q_size": actor_queue.qsize(),
                     }
                 )
@@ -428,6 +429,7 @@ def run_replay_process(
         if not actor_queue.empty():
             replay_buffer.add(*actor_queue.get())
             actor_queue.task_done()
+            num_batches_added += 1
 
         if time.time() - last_report_time > 60:
             output = [

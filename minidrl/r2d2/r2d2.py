@@ -138,7 +138,7 @@ class R2D2Config:
     # Base epsilon for actor epsilon-greedy exploration
     # Each actor has a different epsilon value for exploration. See `get_actor_epsilon`
     # for details.
-    actor_base_epsilon: float = 0.05
+    actor_base_epsilon: float = 0.4
     # Actor exploration alpha hyperparameter. See `get_actor_epsilon` for details.
     actor_alpha: float = 7.0
 
@@ -592,13 +592,13 @@ def run_actor(
                 try:
                     replay_queue.put(
                         (
-                            obs_seq_buffer,
-                            action_seq_buffer,
-                            reward_seq_buffer,
-                            done_buffer,
-                            lstm_h_seq_buffer,
-                            lstm_c_seq_buffer,
-                            priority,
+                            obs_seq_buffer.clone(),
+                            action_seq_buffer.clone(),
+                            reward_seq_buffer.clone(),
+                            done_buffer.clone(),
+                            lstm_h_seq_buffer.clone(),
+                            lstm_c_seq_buffer.clone(),
+                            priority.clone(),
                         ),
                         block=True,  # block until space available
                         timeout=1,  # timeout after 1 second, to check for terminate
