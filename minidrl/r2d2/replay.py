@@ -333,6 +333,7 @@ def run_replay_process(
     actor_queue: mp.JoinableQueue,
     learner_recv_queue: mp.JoinableQueue,
     learner_send_queue: mp.JoinableQueue,
+    log_queue: mp.JoinableQueue,
     terminate_event: mp.Event,
 ):
     """Run the replay process.
@@ -347,6 +348,8 @@ def run_replay_process(
         Queue for receiving requests from the learner.
     learner_send_queue
         Queue for sending sampled transitions to the learner.
+    log_queue
+        Queue for sending stats to the main process for logging.
     terminate_event
         Event for signaling terminating of the run.
     """
@@ -364,8 +367,7 @@ def run_replay_process(
     replay_buffer = R2D2PrioritizedReplay(obs_space, config)
 
     print("replay: waiting for buffer to fill")
-    last_report_time = time.time()
-    start_time = time.time()
+    start_time, last_log_time = time.time(), time.time()
     while replay_buffer.size < config.learning_starts and not terminate_event.is_set():
         try:  # noqa: SIM105
             replay_buffer.add(*actor_queue.get(timeout=1))
@@ -394,7 +396,6 @@ def run_replay_process(
                 learner_send_queue.put((samples, indices, weights))
                 num_sampled_seqs += batch_size
                 num_batches_sampled += 1
-
             elif request[0] == "update_priorities":
                 replay_buffer.update_priorities(*request[1:])
                 # free references to shared memory resources
@@ -403,11 +404,21 @@ def run_replay_process(
             elif request[0] == "get_buffer_size":
                 learner_recv_queue.task_done()
                 learner_send_queue.put(replay_buffer.size)
-            elif request[0] == "get_replay_stats":
+            else:
                 learner_recv_queue.task_done()
-                time_running = time.time() - start_time
-                training_time = time.time() - training_start_time
-                learner_send_queue.put(
+                raise ValueError(f"Unknown learner request: {request}")
+
+        if not actor_queue.empty():
+            replay_buffer.add(*actor_queue.get())
+            actor_queue.task_done()
+            num_batches_added += 1
+
+        if time.time() - last_log_time > 5:
+            time_running = time.time() - start_time
+            training_time = time.time() - training_start_time
+            log_queue.put(
+                (
+                    "replay",
                     {
                         "size": replay_buffer.size,
                         "seqs_added": replay_buffer.num_added,
@@ -419,30 +430,14 @@ def run_replay_process(
                         "sampled_seq_per_sec": num_sampled_seqs / training_time,
                         "sampled_batch_per_sec": num_batches_sampled / training_time,
                         "q_size": actor_queue.qsize(),
-                    }
+                    },
                 )
-            else:
-                learner_recv_queue.task_done()
-                raise ValueError(f"Unknown learner request: {request}")
-
-        # Receive transition from actors
-        if not actor_queue.empty():
-            replay_buffer.add(*actor_queue.get())
-            actor_queue.task_done()
-            num_batches_added += 1
-
-        if time.time() - last_report_time > 60:
-            output = [
-                f"\nreplay - size: {replay_buffer.size}/{replay_buffer.capacity}",
-                f"total seqs added: {replay_buffer.num_added}",
-                f"total steps added: {replay_buffer.num_added * config.seq_len}",
-                f"qsize: {actor_queue.qsize()}/{actor_queue._maxsize}",
-            ]
-            print("\n  ".join(output))
-            last_report_time = time.time()
+            )
+            last_log_time = time.time()
 
     print("replay - terminate signal recieved.")
     print("replay - waiting for shared resources to be released.")
     learner_send_queue.join()
+    log_queue.join()
 
     print("Replay - exiting.")

@@ -13,7 +13,6 @@ https://github.com/michaelnny/deep_rl_zoo/tree/main
 import math
 import os
 import random
-import threading
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
@@ -423,8 +422,8 @@ def run_actor(
     actor_idx: int,
     config: R2D2Config,
     replay_queue: mp.JoinableQueue,
-    learner_send_queue: mp.JoinableQueue,
     learner_recv_queue: mp.JoinableQueue,
+    log_queue: mp.JoinableQueue,
     terminate_event: mp.Event,
 ):
     """Run an R2D2 actor process.
@@ -440,10 +439,10 @@ def run_actor(
         Configuration for R2D2.
     replay_queue
         Queue for sending trajectories to replay.
-    learner_send_queue
-        Queue for sending results and parameter requests to learner.
     learner_recv_queue
-        Queue for receiving parameters from learner.
+        Queue for receiving model parameters from learner.
+    log_queue
+        Queue for sending results to logger process.
     terminate_event
         Event for signaling termination of run.
     """
@@ -530,7 +529,6 @@ def run_actor(
     start_time = time.time()
 
     # get reference to learner model weights
-    learner_send_queue.put(("get_model_params", actor_idx))
     learner_model_weights = None
     while not terminate_event.is_set():
         try:
@@ -655,6 +653,7 @@ def run_actor(
                 results = {
                     "actor_steps": step * config.num_envs_per_actor,
                     "actor_sps": sps,
+                    "actor_epsilon": epsilon,
                     "estimated_total_actor_sps": sps * config.num_actors,
                     "mean_episode_returns": ep_returns.mean().item(),
                     "max_episode_returns": ep_returns.max().item(),
@@ -662,7 +661,7 @@ def run_actor(
                     "mean_episode_lengths": ep_lengths.mean().item(),
                     "actor_episodes_completed": num_episodes_completed,
                 }
-                learner_send_queue.put(("send_results", results))
+                log_queue.put(("actor", results))
 
     print(f"actor={actor_idx} - t={step} terminate signal recieved.")
     envs.close()
@@ -673,7 +672,7 @@ def run_actor(
 
     print(f"actor={actor_idx} - t={step}: Waiting for shared resources to be released.")
     replay_queue.join()
-    learner_send_queue.join()
+    log_queue.join()
 
     print(f"actor={actor_idx} - t={step}: Actor Finished.")
 
@@ -682,8 +681,8 @@ def run_learner(
     config: R2D2Config,
     replay_send_queue: mp.JoinableQueue,
     replay_recv_queue: mp.JoinableQueue,
-    actor_recv_queue: mp.JoinableQueue,
     actor_send_queues: list[mp.JoinableQueue],
+    log_queue: mp.JoinableQueue,
     termination_event: mp.Event,
 ):
     """Run the R2D2 learner process.
@@ -696,47 +695,24 @@ def run_learner(
         Configuration for R2D2.
     replay_send_queue
         Queue for sending requests to the replay.
-    replay_rec_queue
+    replay_recv_queue
         Queue for recieving trajectories from the replay.
-    actor_recv_queue
-        Queue for receiving results and requests for parameters from actors.
     actor_send_queues
-        Queues (one for each actor) for sending parameters to each actor.
+        Queues (one for each actor) for sending model parameters to each actor.
+    log_queue
+        Queue for sending results to logger process.
     termination_event
         Event for signaling termination of run.
     """
-
     # Limit learner to using a single CPU thread.
     # This prevents learner from using all available cores, which can lead to contention
     # with actor and replay processes.
     torch.set_num_threads(1)
 
-    # Logging setup
-    # Do this after workers are spawned to avoid log duplication
-    if config.track_wandb:
-        import wandb
-
-        wandb.init(
-            project=config.wandb_project,
-            entity=config.wandb_entity,
-            sync_tensorboard=True,
-            config=vars(config),
-            name=config.run_name,
-            monitor_gym=True,
-            save_code=True,
-        )
-
-    writer = SummaryWriter(config.log_dir)
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s"
-        % ("\n".join([f"|{key}|{value}|" for key, value in vars(config).items()])),
-    )
-    uploaded_video_files = set()
-
     # model setup
     device = config.device
     model = config.load_model()
+    model.share_memory()
     model.to(device)
 
     target_model = config.load_model()
@@ -748,102 +724,9 @@ def run_learner(
         model.parameters(), lr=config.learning_rate, eps=config.adam_eps
     )
 
-    # Global training step
-    # Careful: shared beween threads on learner process so needs to be set up before
-    # defining thread function
-    global_step = 0
-    update = 1
-
-    # Setup background thread
-    end_training_event = threading.Event()
-
-    def run_background_thread():
-        """Runs a thread that handles various background tasks."""
-        print("learner: param_sync_thread - started")
-        last_replay_log_time = time.time()
-        last_video_upload_time = time.time()
-        replay_stats_requested = False
-        while not end_training_event.is_set() and not termination_event.is_set():
-            try:
-                # set timeout so that we can check if training is done
-                request = actor_recv_queue.get(timeout=1)
-                if request[0] == "get_model_params":
-                    actor_recv_queue.task_done()
-                    actor_send_queues[request[1]].put(("params", model.state_dict()))
-                elif request[0] == "send_results":
-                    # log actor results
-                    for key, value in request[1].items():
-                        writer.add_scalar(f"actor/{key}", value, global_step)
-
-                    result_output = [f"\nlearner: actor results (step={global_step})"]
-                    for key, value in request[1].items():
-                        # log to stdout
-                        if isinstance(value, float):
-                            result_output.append(f"{key}={value:0.4f}")
-                        else:
-                            result_output.append(f"{key}={value}")
-                    print("\n  ".join(result_output))
-                    actor_recv_queue.task_done()
-                else:
-                    actor_recv_queue.task_done()
-                    raise ValueError(f"Unknown request {request}")
-            except Empty:
-                pass
-
-            if time.time() - last_replay_log_time >= 10:
-                if not replay_stats_requested:
-                    replay_send_queue.put(("get_replay_stats", None))
-                    replay_stats_requested = True
-                try:
-                    replay_stats = replay_recv_queue.get(timeout=1)
-                    replay_recv_queue.task_done()
-
-                    for key, value in replay_stats.items():
-                        writer.add_scalar(f"replay/{key}", value, global_step)
-
-                    result_output = [
-                        f"\nlearner: replay stats (step={global_step} update={update})"
-                    ]
-                    for key, value in replay_stats.items():
-                        # log to stdout
-                        if isinstance(value, float):
-                            result_output.append(f"{key}={value:0.4f}")
-                        else:
-                            result_output.append(f"{key}={value}")
-                    print("\n  ".join(result_output))
-                    replay_stats_requested = False
-                    last_replay_log_time = time.time()
-                except Empty:
-                    pass
-
-            if (
-                config.capture_video
-                and config.track_wandb
-                and time.time() - last_video_upload_time >= 5
-            ):
-                video_filenames = [
-                    fname
-                    for fname in os.listdir(config.video_dir)
-                    if fname.endswith(".mp4") and fname not in uploaded_video_files
-                ]
-                if video_filenames:
-                    print(f"learner: uploading {len(video_filenames)} videos")
-                    video_filenames.sort()
-                    for filename in video_filenames:
-                        wandb.log(  # type:ignore
-                            {
-                                "video": wandb.Video(  # type:ignore
-                                    os.path.join(config.video_dir, filename)
-                                )
-                            }
-                        )
-                        uploaded_video_files.add(filename)
-                last_video_upload_time = time.time()
-
-        print("learner: background_thread - done")
-
-    background_thread = threading.Thread(target=run_background_thread)
-    background_thread.start()
+    # Send shared memory model weights reference to actors
+    for queue in actor_send_queues:
+        queue.put(("params", model.state_dict()))
 
     # Wait for actors to start and fill replay buffer
     print("learner: Waiting for actors to start and fill replay buffer...")
@@ -859,7 +742,9 @@ def run_learner(
 
     # Training loop
     print("learner: Starting training loop...")
-    train_start_time, last_report_time = time.time(), time.time()
+    global_step = 0
+    update = 1
+    train_start_time = time.time()
     while update < config.num_updates + 1 and not termination_event.is_set():
         update_start_time = time.time()
         # samples: (T, B, ...), indices: (B,), weights: (B,)
@@ -972,29 +857,24 @@ def run_learner(
             global_step += config.batch_size * config.seq_len
             q_max = torch.mean(torch.max(q_values, dim=-1)[0])
 
-            writer.add_scalar(
-                "losses/learning_rate", optimizer.param_groups[0]["lr"], global_step
-            )
-            writer.add_scalar("losses/value_loss", loss.item(), global_step)
-            writer.add_scalar("losses/q_max", q_max.item(), global_step)
-            writer.add_scalar(
-                "losses/mean_priorities", priorities.mean().item(), global_step
-            )
-            writer.add_scalar(
-                "losses/max_priorities", priorities.max().item(), global_step
-            )
-            writer.add_scalar(
-                "losses/min_priorities", priorities.min().item(), global_step
-            )
+            learning_stats = {
+                "global_step": global_step,
+                "update": update,
+                "burnin_time": burnin_time,
+                "learning_time": learning_time,
+                "losses/learning_rate": optimizer.param_groups[0]["lr"],
+                "losses/value_loss": loss.item(),
+                "losses/q_max": q_max.item(),
+                "losses/mean_priorities": priorities.mean().item(),
+                "losses/max_priorities": priorities.max().item(),
+                "losses/min_priorities": priorities.min().item(),
+            }
             if unclipped_grad_norm is not None:
-                writer.add_scalar(
-                    "losses/unclipped_grad_norm",
-                    unclipped_grad_norm.item(),
-                    global_step,
-                )
-            writer.add_scalar("charts/update", update, global_step)
-            writer.add_scalar("charts/burnin_time", burnin_time, global_step)
-            writer.add_scalar("charts/learning_time", learning_time, global_step)
+                learning_stats[
+                    "losses/unclipped_grad_norm"
+                ] = unclipped_grad_norm.item()
+
+            log_queue.put(("learner", learning_stats))
 
             if config.save_interval > 0 and update % config.save_interval == 0:
                 print("Saving model")
@@ -1021,33 +901,17 @@ def run_learner(
         ups = update / (time.time() - train_start_time)
         sps = global_step / (time.time() - train_start_time)
         update_time = time.time() - update_start_time
-        writer.add_scalar("charts/learner_SPS", sps, global_step)
-        writer.add_scalar("charts/learner_UPS", ups, global_step)
-        writer.add_scalar("charts/sample_time", sample_time, global_step)
-        writer.add_scalar("charts/update_time", update_time, global_step)
-        writer.add_scalar(
-            "charts/sample_time_per_batch",
-            sample_time / config.num_prefetch_batches,
-            global_step,
-        )
-        writer.add_scalar(
-            "charts/update_time_per_batch",
-            update_time / config.num_prefetch_batches,
-            global_step,
-        )
-
-        if time.time() - last_report_time > 5:
-            # periodically log to stdout
-            training_time = timedelta(seconds=int(time.time() - train_start_time))
-            output = "\n".join(
-                [
-                    f"\nlearner: time={training_time} {update=} {global_step=}",
-                    f"  UPS={ups:.1f}",
-                    f"  SPS={sps:.1f}",
-                ]
-            )
-            print(output)
-            last_report_time = time.time()
+        learning_stats = {
+            "update": update,
+            "global_step": global_step,
+            "learner_SPS": sps,
+            "learner_UPS": ups,
+            "sample_time": sample_time,
+            "update_time": update_time,
+            "sample_time_per_batch": sample_time / config.num_prefetch_batches,
+            "update_time_per_batch": update_time / config.num_prefetch_batches,
+        }
+        log_queue.put(("learner", learning_stats))
 
     if termination_event.is_set():
         print("learner: Training terminated early due to error.")
@@ -1056,12 +920,6 @@ def run_learner(
         # and to signal to main that learner finished as expected
         termination_event.set()
         print("learner: Training complete.")
-
-    print("learner: Shutting down background thread.")
-    end_training_event.set()
-    background_thread.join()
-
-    writer.close()
 
     print("learner: waiting for shared resources to be released")
     replay_send_queue.join()
@@ -1108,6 +966,7 @@ def run_r2d2(config: R2D2Config):
     actor_send_queues = [mp_ctxt.JoinableQueue() for _ in range(config.num_actors)]
     replay_send_queue = mp_ctxt.JoinableQueue()
     replay_recv_queue = mp_ctxt.JoinableQueue()
+    log_queue = mp_ctxt.JoinableQueue()
 
     print("main: Spawning replay process.")
     replay_process = mp_ctxt.Process(
@@ -1117,6 +976,7 @@ def run_r2d2(config: R2D2Config):
             actor_replay_queue,
             replay_send_queue,
             replay_recv_queue,
+            log_queue,
             terminate_event,
         ),
     )
@@ -1131,8 +991,8 @@ def run_r2d2(config: R2D2Config):
                 actor_idx,
                 config,
                 actor_replay_queue,
-                actor_recv_queue,
                 actor_send_queues[actor_idx],
+                log_queue,
                 terminate_event,
             ),
         )
@@ -1146,21 +1006,112 @@ def run_r2d2(config: R2D2Config):
             config,
             replay_send_queue,
             replay_recv_queue,
-            actor_recv_queue,
             actor_send_queues,
+            log_queue,
             terminate_event,
         ),
     )
     learner.start()
 
+    # Logging setup
+    # Do this after other processes are spawned to avoid log duplication
+    if config.track_wandb:
+        import wandb
+
+        wandb.init(
+            project=config.wandb_project,
+            entity=config.wandb_entity,
+            sync_tensorboard=True,
+            config=vars(config),
+            name=config.run_name,
+            monitor_gym=True,
+            save_code=True,
+        )
+
+    writer = SummaryWriter(config.log_dir)
+    writer.add_text(
+        "hyperparameters",
+        "|param|value|\n|-|-|\n%s"
+        % ("\n".join([f"|{key}|{value}|" for key, value in vars(config).items()])),
+    )
+    uploaded_video_files = set()
+
     print("main: Waiting for replay, actor, and learner processes to finish.")
+    update, global_step = 0, 0
+    start_time = time.time()
+    last_report_time = time.time()
     while (
         not terminate_event.is_set()
         and learner.is_alive()
         and replay_process.is_alive()
         and all(a.is_alive() for a in actors)
     ):
-        time.sleep(1)
+        try:
+            result = log_queue.get(timeout=1)
+            training_time = timedelta(seconds=int(time.time() - start_time))
+            progress = (global_step / config.total_timesteps) * 100
+            progress_str = f"{training_time} {global_step=} {update=} {progress=:.2f}%"
+            if result[0] == "actor":
+                # log actor results
+                for key, value in result[1].items():
+                    writer.add_scalar(f"actor/{key}", value, global_step)
+
+                result_output = [f"\nmain [{progress_str}]: actor results"]
+                for key, value in result[1].items():
+                    # log to stdout
+                    if isinstance(value, float):
+                        result_output.append(f"{key}={value:0.4f}")
+                    else:
+                        result_output.append(f"{key}={value}")
+                print("\n  ".join(result_output), "\n")
+                log_queue.task_done()
+            elif result[0] == "replay":
+                for key, value in result[1].items():
+                    writer.add_scalar(f"replay/{key}", value, global_step)
+
+                result_output = [f"\nmain [{progress_str}]: replay stats"]
+                for key, value in result[1].items():
+                    # log to stdout
+                    if isinstance(value, float):
+                        result_output.append(f"{key}={value:0.4f}")
+                    else:
+                        result_output.append(f"{key}={value}")
+                print("\n  ".join(result_output), "\n")
+                log_queue.task_done()
+            elif result[0] == "learner":
+                global_step = result[1].get("global_step", global_step)
+                update = result[1].get("update", update)
+                for key, value in result[1].items():
+                    writer.add_scalar(key, value, global_step)
+
+                if "learner_UPS" in result[1] and time.time() - last_report_time > 5:
+                    print(f"main [{progress_str}]: UPS={result[1]['learner_UPS']:.1f}")
+                    last_report_time = time.time()
+                log_queue.task_done()
+            else:
+                log_queue.task_done()
+                raise ValueError(f"Unknown result {result}")
+        except Empty:
+            pass
+
+        if config.capture_video and config.track_wandb:
+            video_filenames = [
+                fname
+                for fname in os.listdir(config.video_dir)
+                if fname.endswith(".mp4") and fname not in uploaded_video_files
+            ]
+            if video_filenames:
+                print(f"main: uploading {len(video_filenames)} videos")
+                video_filenames.sort()
+                for filename in video_filenames:
+                    wandb.log(  # type:ignore
+                        {
+                            "video": wandb.Video(  # type:ignore
+                                os.path.join(config.video_dir, filename)
+                            )
+                        }
+                    )
+                    uploaded_video_files.add(filename)
 
     print("main: Training ended, shutting down.")
     if terminate_event.is_set():
@@ -1177,6 +1128,8 @@ def run_r2d2(config: R2D2Config):
     if not terminate_event.is_set():
         terminate_event.set()
 
+    writer.close()
+
     # give time for processes to close and stop adding to queues
     time.sleep(2)
 
@@ -1186,6 +1139,7 @@ def run_r2d2(config: R2D2Config):
         replay_send_queue,
         replay_recv_queue,
         actor_recv_queue,
+        log_queue,
     ] + actor_send_queues:
         while not q.empty():
             q.get()
