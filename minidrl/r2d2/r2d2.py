@@ -118,7 +118,7 @@ class R2D2Config:
     wandb_entity: Optional[str] = None
 
     # The ID of the gymnasium environment
-    env_id: str = "CartPole-v1"
+    env_id: str = "PongNoFrameskip-v4"
     # Whether to capture videos of the agent performances (check out `videos` folder)
     capture_video: bool = False
 
@@ -159,6 +159,10 @@ class R2D2Config:
     priority_td_error_mix: float = 0.9
     # The Discount factor
     gamma: float = 0.997
+    # Number of batches to sample from replay buffer at a time
+    # Increasing this will increase the amount of memory used, but should also increase
+    # the speed of training, by reducing the overall time spent sampling from replay.
+    num_prefetch_batches: int = 8
     # Size (i.e. number of sequence) of each learner update batch
     batch_size: int = 64
     # Number of steps for n-step return
@@ -524,22 +528,24 @@ def run_actor(
     episode_returns = np.zeros(100, dtype=np.float32)
     episode_lengths = np.zeros(100, dtype=np.int64)
     start_time = time.time()
+
+    # get reference to learner model weights
+    learner_send_queue.put(("get_model_params", actor_idx))
+    learner_model_weights = None
+    while not terminate_event.is_set():
+        try:
+            result = learner_recv_queue.get(timeout=1)
+            assert result[0] == "params"
+            learner_model_weights = result[1]
+            actor_model.load_state_dict(result[1])
+            break
+        except Empty:
+            pass
+
     # main loop
     while not terminate_event.is_set():
         if step % config.actor_update_interval == 0:
-            learner_send_queue.put(("get_latest_params", actor_idx))
-            while not terminate_event.is_set():
-                try:
-                    result = learner_recv_queue.get(timeout=1)
-                    assert result[0] == "params"
-                    actor_model.load_state_dict(result[1])
-                    del result  # free reference
-                    learner_recv_queue.task_done()
-                    break
-                except Empty:
-                    pass
-            if terminate_event.is_set():
-                break
+            actor_model.load_state_dict(learner_model_weights)
 
         # q_t = Q(o_t, a_tm1, r_tm1, d_tm1)
         q_vals, lstm_state = actor_model.forward(
@@ -661,6 +667,10 @@ def run_actor(
     print(f"actor={actor_idx} - t={step} terminate signal recieved.")
     envs.close()
 
+    # delete references to shared memory, and signal that it's been done
+    del learner_model_weights
+    learner_recv_queue.task_done()
+
     print(f"actor={actor_idx} - t={step}: Waiting for shared resources to be released.")
     replay_queue.join()
     learner_send_queue.join()
@@ -742,25 +752,24 @@ def run_learner(
     # Careful: shared beween threads on learner process so needs to be set up before
     # defining thread function
     global_step = 0
+    update = 1
 
-    # Setup parameter synchronization thread
-    parameter_lock = threading.Lock()
+    # Setup background thread
     end_training_event = threading.Event()
 
-    def run_param_sync_thread():
-        """Runs a thread that synchronizes parameters between learner and actors."""
+    def run_background_thread():
+        """Runs a thread that handles various background tasks."""
         print("learner: param_sync_thread - started")
+        last_replay_log_time = time.time()
+        last_video_upload_time = time.time()
+        replay_stats_requested = False
         while not end_training_event.is_set() and not termination_event.is_set():
             try:
                 # set timeout so that we can check if training is done
                 request = actor_recv_queue.get(timeout=1)
-                if request[0] == "get_latest_params":
+                if request[0] == "get_model_params":
                     actor_recv_queue.task_done()
-                    with parameter_lock:
-                        model_state = {
-                            k: v.cpu() for k, v in model.state_dict().items()
-                        }
-                    actor_send_queues[request[1]].put(("params", model_state))
+                    actor_send_queues[request[1]].put(("params", model.state_dict()))
                 elif request[0] == "send_results":
                     # log actor results
                     for key, value in request[1].items():
@@ -781,172 +790,10 @@ def run_learner(
             except Empty:
                 pass
 
-        print("learner: param_sync_thread - done")
-
-    param_sync_thread = threading.Thread(target=run_param_sync_thread)
-    param_sync_thread.start()
-
-    # Wait for actors to start and fill replay buffer
-    print("learner: Waiting for actors to start and fill replay buffer...")
-    replay_send_queue.put(("get_buffer_size", None))
-    while not termination_event.is_set():
-        try:
-            buffer_size = replay_recv_queue.get(timeout=1)
-            replay_recv_queue.task_done()
-            assert buffer_size >= config.learning_starts
-            break
-        except Empty:
-            pass
-
-    # Training loop
-    print("learner: Starting training loop...")
-    train_start_time, last_report_time = time.time(), time.time()
-    update = 1
-    while update < config.num_updates + 1 and not termination_event.is_set():
-        update_start_time = time.time()
-        # samples: (T, B, ...), indices: (B,), weights: (B,)
-        replay_send_queue.put(("sample", config.batch_size))
-        batch = None
-        while not termination_event.is_set():
-            try:
-                batch = replay_recv_queue.get(timeout=1)
-                break
-            except Empty:
-                pass
-        if termination_event.is_set():
-            if batch is not None:
-                del batch
-                replay_recv_queue.task_done()
-            break
-
-        sample_time = time.time() - update_start_time
-
-        (obs, actions, rewards, dones, lstm_h, lstm_c), indices, weights = batch
-        target_lstm_c, target_lstm_h = lstm_c.clone(), lstm_h.clone()
-
-        burnin_time_start = time.time()
-        # burn in lstm state
-        if config.burnin_len > 0:
-            with torch.no_grad():
-                _, (lstm_h, lstm_c) = model.forward(
-                    obs[: config.burnin_len],
-                    actions[: config.burnin_len],
-                    rewards[: config.burnin_len],
-                    dones[: config.burnin_len],
-                    (lstm_h, lstm_c),
-                )
-                _, (target_lstm_h, target_lstm_c) = model.forward(
-                    obs[: config.burnin_len],
-                    actions[: config.burnin_len],
-                    rewards[: config.burnin_len],
-                    dones[: config.burnin_len],
-                    (target_lstm_c, target_lstm_h),
-                )
-        burnin_time = time.time() - burnin_time_start
-
-        # compute loss and gradients and update parameters
-        learning_start_time = time.time()
-
-        q_values, _ = model.forward(
-            obs[config.burnin_len :],
-            actions[config.burnin_len :],
-            rewards[config.burnin_len :],
-            dones[config.burnin_len :],
-            (lstm_h, lstm_c),
-        )
-
-        with torch.no_grad():
-            target_q_values, _ = target_model.forward(
-                obs[config.burnin_len :],
-                actions[config.burnin_len :],
-                rewards[config.burnin_len :],
-                dones[config.burnin_len :],
-                (target_lstm_h, target_lstm_c),
-            )
-
-        loss, priorities = compute_loss_and_priority(
-            config=config,
-            q_values=q_values,
-            actions=actions[config.burnin_len :],
-            rewards=rewards[config.burnin_len :],
-            dones=dones[config.burnin_len :],
-            target_q_values=target_q_values,
-        )
-        loss = torch.mean(loss * weights.detach())
-
-        with parameter_lock:
-            optimizer.zero_grad()
-            loss.backward()
-            if config.clip_grad_norm:
-                unclipped_grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), config.max_grad_norm
-                )
-            else:
-                unclipped_grad_norm = None
-            optimizer.step()
-
-        learning_time = time.time() - learning_start_time
-
-        replay_send_queue.put(("update_priorities", indices, priorities.tolist()))
-
-        # release shared memory references
-        del obs, actions, rewards, dones, lstm_h, lstm_c, indices, weights, batch
-        replay_recv_queue.task_done()
-
-        if update > 1 and update % config.target_network_update_interval == 0:
-            print(f"\nlearner: {global_step=} {update=} - updating target network.")
-            target_model.load_state_dict(model.state_dict())
-
-        update_time = time.time() - update_start_time
-
-        # log metrics
-        update += 1
-        global_step += config.batch_size * config.seq_len
-        ups = update / (time.time() - train_start_time)
-        sps = global_step / (time.time() - train_start_time)
-        q_max = torch.mean(torch.max(q_values, dim=-1)[0])
-
-        if time.time() - last_report_time > 5:
-            # periodically log to stdout
-            training_time = timedelta(seconds=int(time.time() - train_start_time))
-            output = "\n".join(
-                [
-                    f"\nlearner: time={training_time} {update=} {global_step=}",
-                    f"  loss={loss.item():0.6f}",
-                    f"  q_max={q_max.item():0.6f}",
-                    f"  UPS={ups:.1f}",
-                    f"  SPS={sps:.1f}",
-                ]
-            )
-            print(output)
-            last_report_time = time.time()
-
-        writer.add_scalar(
-            "losses/learning_rate", optimizer.param_groups[0]["lr"], global_step
-        )
-        writer.add_scalar("losses/value_loss", loss.item(), global_step)
-        writer.add_scalar("losses/q_max", q_max.item(), global_step)
-        writer.add_scalar(
-            "losses/mean_priorities", priorities.mean().item(), global_step
-        )
-        writer.add_scalar("losses/max_priorities", priorities.max().item(), global_step)
-        writer.add_scalar("losses/min_priorities", priorities.min().item(), global_step)
-        if unclipped_grad_norm is not None:
-            writer.add_scalar(
-                "losses/unclipped_grad_norm", unclipped_grad_norm.item(), global_step
-            )
-        writer.add_scalar("charts/update", update, global_step)
-        writer.add_scalar("charts/learner_SPS", sps, global_step)
-        writer.add_scalar("charts/learner_UPS", ups, global_step)
-        writer.add_scalar("charts/sample_time", sample_time, global_step)
-        writer.add_scalar("charts/burnin_time", burnin_time, global_step)
-        writer.add_scalar("charts/learning_time", learning_time, global_step)
-        writer.add_scalar("charts/update_time", update_time, global_step)
-
-        # log replay stats (making sure to log after first update)
-        if update == 2 or update % 100 == 0:
-            replay_send_queue.put(("get_replay_stats", None))
-            while not termination_event.is_set():
+            if time.time() - last_replay_log_time >= 10:
+                if not replay_stats_requested:
+                    replay_send_queue.put(("get_replay_stats", None))
+                    replay_stats_requested = True
                 try:
                     replay_stats = replay_recv_queue.get(timeout=1)
                     replay_recv_queue.task_done()
@@ -964,41 +811,243 @@ def run_learner(
                         else:
                             result_output.append(f"{key}={value}")
                     print("\n  ".join(result_output))
-                    break
+                    replay_stats_requested = False
+                    last_replay_log_time = time.time()
                 except Empty:
                     pass
 
-        if config.save_interval > 0 and update % config.save_interval == 0:
-            print("Saving model")
-            torch.save(
-                {
-                    "model": model.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "global_step": global_step,
-                    "update": update,
-                    "config": asdict(config),
-                },
-                os.path.join(config.log_dir, f"checkpoint_{global_step}.pt"),
+            if (
+                config.capture_video
+                and config.track_wandb
+                and time.time() - last_video_upload_time >= 5
+            ):
+                video_filenames = [
+                    fname
+                    for fname in os.listdir(config.video_dir)
+                    if fname.endswith(".mp4") and fname not in uploaded_video_files
+                ]
+                if video_filenames:
+                    print(f"learner: uploading {len(video_filenames)} videos")
+                    video_filenames.sort()
+                    for filename in video_filenames:
+                        wandb.log(  # type:ignore
+                            {
+                                "video": wandb.Video(  # type:ignore
+                                    os.path.join(config.video_dir, filename)
+                                )
+                            }
+                        )
+                        uploaded_video_files.add(filename)
+                last_video_upload_time = time.time()
+
+        print("learner: background_thread - done")
+
+    background_thread = threading.Thread(target=run_background_thread)
+    background_thread.start()
+
+    # Wait for actors to start and fill replay buffer
+    print("learner: Waiting for actors to start and fill replay buffer...")
+    replay_send_queue.put(("get_buffer_size", None))
+    while not termination_event.is_set():
+        try:
+            buffer_size = replay_recv_queue.get(timeout=1)
+            replay_recv_queue.task_done()
+            assert buffer_size >= config.learning_starts
+            break
+        except Empty:
+            pass
+
+    # Training loop
+    print("learner: Starting training loop...")
+    train_start_time, last_report_time = time.time(), time.time()
+    while update < config.num_updates + 1 and not termination_event.is_set():
+        update_start_time = time.time()
+        # samples: (T, B, ...), indices: (B,), weights: (B,)
+        replay_send_queue.put(
+            ("sample", config.batch_size * config.num_prefetch_batches)
+        )
+        batch = None
+        while not termination_event.is_set():
+            try:
+                batch = replay_recv_queue.get(timeout=1)
+                break
+            except Empty:
+                pass
+        if termination_event.is_set():
+            if batch is not None:
+                del batch
+                replay_recv_queue.task_done()
+            break
+
+        sample_time = time.time() - update_start_time
+
+        (obs, actions, rewards, dones, lstm_h, lstm_c), indices, weights = batch
+
+        burnin_time, learning_time = 0.0, 0.0
+        updated_priorities = []
+        q_values = 0.0
+        for batch_idx in range(config.num_prefetch_batches):
+            start_idx = batch_idx * config.batch_size
+            end_idx = start_idx + config.batch_size
+
+            b_obs = obs[:, start_idx:end_idx]
+            b_actions = actions[:, start_idx:end_idx]
+            b_rewards = rewards[:, start_idx:end_idx]
+            b_dones = dones[:, start_idx:end_idx]
+            b_lstm_h = lstm_h[:, start_idx:end_idx]
+            b_lstm_c = lstm_c[:, start_idx:end_idx]
+            b_weights = weights[start_idx:end_idx]
+
+            b_target_lstm_h, b_target_lstm_c = b_lstm_h.clone(), b_lstm_c.clone()
+
+            burnin_time_start = time.time()
+            # burn in lstm state
+            if config.burnin_len > 0:
+                with torch.no_grad():
+                    _, (b_lstm_h, b_lstm_c) = model.forward(
+                        b_obs[: config.burnin_len],
+                        b_actions[: config.burnin_len],
+                        b_rewards[: config.burnin_len],
+                        b_dones[: config.burnin_len],
+                        (b_lstm_h, b_lstm_c),
+                    )
+                    _, (b_target_lstm_h, b_target_lstm_c) = model.forward(
+                        b_obs[: config.burnin_len],
+                        b_actions[: config.burnin_len],
+                        b_rewards[: config.burnin_len],
+                        b_dones[: config.burnin_len],
+                        (b_target_lstm_h, b_target_lstm_c),
+                    )
+            burnin_time = time.time() - burnin_time_start
+
+            # compute loss and gradients and update parameters
+            learning_start_time = time.time()
+
+            q_values, _ = model.forward(
+                b_obs[config.burnin_len :],
+                b_actions[config.burnin_len :],
+                b_rewards[config.burnin_len :],
+                b_dones[config.burnin_len :],
+                (b_lstm_h, b_lstm_c),
             )
 
-        if config.capture_video and config.track_wandb:
-            video_filenames = [
-                fname
-                for fname in os.listdir(config.video_dir)
-                if fname.endswith(".mp4") and fname not in uploaded_video_files
-            ]
-            if video_filenames:
-                print(f"Uploading {len(video_filenames)} videos")
-                video_filenames.sort()
-                for filename in video_filenames:
-                    wandb.log(  # type:ignore
-                        {
-                            "video": wandb.Video(  # type:ignore
-                                os.path.join(config.video_dir, filename)
-                            )
-                        }
-                    )
-                    uploaded_video_files.add(filename)
+            with torch.no_grad():
+                target_q_values, _ = target_model.forward(
+                    b_obs[config.burnin_len :],
+                    b_actions[config.burnin_len :],
+                    b_rewards[config.burnin_len :],
+                    b_dones[config.burnin_len :],
+                    (b_target_lstm_h, b_target_lstm_c),
+                )
+
+            loss, priorities = compute_loss_and_priority(
+                config=config,
+                q_values=q_values,
+                actions=b_actions[config.burnin_len :],
+                rewards=b_rewards[config.burnin_len :],
+                dones=b_dones[config.burnin_len :],
+                target_q_values=target_q_values,
+            )
+            loss = torch.mean(loss * b_weights.detach())
+
+            updated_priorities.extend(priorities.tolist())
+
+            optimizer.zero_grad()
+            loss.backward()
+            if config.clip_grad_norm:
+                unclipped_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), config.max_grad_norm
+                )
+            else:
+                unclipped_grad_norm = None
+            optimizer.step()
+
+            learning_time = time.time() - learning_start_time
+
+            if update > 1 and update % config.target_network_update_interval == 0:
+                target_model.load_state_dict(model.state_dict())
+
+            # log metrics
+            update += 1
+            global_step += config.batch_size * config.seq_len
+            q_max = torch.mean(torch.max(q_values, dim=-1)[0])
+
+            writer.add_scalar(
+                "losses/learning_rate", optimizer.param_groups[0]["lr"], global_step
+            )
+            writer.add_scalar("losses/value_loss", loss.item(), global_step)
+            writer.add_scalar("losses/q_max", q_max.item(), global_step)
+            writer.add_scalar(
+                "losses/mean_priorities", priorities.mean().item(), global_step
+            )
+            writer.add_scalar(
+                "losses/max_priorities", priorities.max().item(), global_step
+            )
+            writer.add_scalar(
+                "losses/min_priorities", priorities.min().item(), global_step
+            )
+            if unclipped_grad_norm is not None:
+                writer.add_scalar(
+                    "losses/unclipped_grad_norm",
+                    unclipped_grad_norm.item(),
+                    global_step,
+                )
+            writer.add_scalar("charts/update", update, global_step)
+            writer.add_scalar("charts/burnin_time", burnin_time, global_step)
+            writer.add_scalar("charts/learning_time", learning_time, global_step)
+
+            if config.save_interval > 0 and update % config.save_interval == 0:
+                print("Saving model")
+                torch.save(
+                    {
+                        "model": model.state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                        "global_step": global_step,
+                        "update": update,
+                        "config": asdict(config),
+                    },
+                    os.path.join(config.log_dir, f"checkpoint_{update}.pt"),
+                )
+
+            if batch_idx == 4:
+                del b_obs, b_actions, b_rewards, b_dones, b_lstm_h, b_lstm_c
+
+        replay_send_queue.put(("update_priorities", indices, updated_priorities))
+
+        # release shared memory references
+        del obs, actions, rewards, dones, lstm_h, lstm_c, indices, weights, batch
+        replay_recv_queue.task_done()
+
+        ups = update / (time.time() - train_start_time)
+        sps = global_step / (time.time() - train_start_time)
+        update_time = time.time() - update_start_time
+        writer.add_scalar("charts/learner_SPS", sps, global_step)
+        writer.add_scalar("charts/learner_UPS", ups, global_step)
+        writer.add_scalar("charts/sample_time", sample_time, global_step)
+        writer.add_scalar("charts/update_time", update_time, global_step)
+        writer.add_scalar(
+            "charts/sample_time_per_batch",
+            sample_time / config.num_prefetch_batches,
+            global_step,
+        )
+        writer.add_scalar(
+            "charts/update_time_per_batch",
+            update_time / config.num_prefetch_batches,
+            global_step,
+        )
+
+        if time.time() - last_report_time > 5:
+            # periodically log to stdout
+            training_time = timedelta(seconds=int(time.time() - train_start_time))
+            output = "\n".join(
+                [
+                    f"\nlearner: time={training_time} {update=} {global_step=}",
+                    f"  UPS={ups:.1f}",
+                    f"  SPS={sps:.1f}",
+                ]
+            )
+            print(output)
+            last_report_time = time.time()
 
     if termination_event.is_set():
         print("learner: Training terminated early due to error.")
@@ -1008,9 +1057,9 @@ def run_learner(
         termination_event.set()
         print("learner: Training complete.")
 
-    print("learner: Shutting down parameter synchronization thread.")
+    print("learner: Shutting down background thread.")
     end_training_event.set()
-    param_sync_thread.join()
+    background_thread.join()
 
     writer.close()
 

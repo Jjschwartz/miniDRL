@@ -5,6 +5,7 @@ import torch
 import torch.multiprocessing as mp
 from torch import nn
 
+
 INPUT_SIZE = 3
 OUTPUT_SIZE = 1
 
@@ -92,6 +93,7 @@ def main():
             work_done = output_queues[j].get()
             print(f"Boss: worker {j} work done: {work_done}")
             print(f"Boss: worker {j} shared array: {shared_array[j]}")
+            del work_done
 
         print("Boss: all work done")
         print(f"Shared array: {shared_array[:]}")

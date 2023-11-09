@@ -10,11 +10,11 @@ import pandas as pd
 import seaborn as sns
 import torch
 import torch.multiprocessing as mp
-
 from minidrl.r2d2.r2d2 import R2D2Config
 from minidrl.r2d2.replay import run_replay_process
 from minidrl.r2d2.run_atari import atari_model_loader, get_atari_env_creator_fn
 from minidrl.r2d2.run_gym import get_gym_env_creator_fn, gym_model_loader
+
 
 CARTPOLE_CONFIG = {
     "config_kwargs": {
@@ -424,8 +424,9 @@ def plot_add(save_file: str):
 
     y_keys = [
         "added_seq_per_sec",
-        "actor_added_seq_per_sec",
-        "actor_batch_per_sec",
+        "main_added_seq_per_sec",
+        "added_batch_per_sec",
+        "main_added_batch_per_sec",
         "max_q_size",
         "seqs_added",
     ]
