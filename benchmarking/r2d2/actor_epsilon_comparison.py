@@ -9,7 +9,9 @@ def apex_actor_epsilons(
     num_actors: int, base_epsilon: float = 0.4, alpha: float = 7
 ) -> np.ndarray:
     """Get actor exploration epsilons used in Ape-X (and R2D2) papers."""
-    return np.power(base_epsilon, 1 + alpha * np.arange(num_actors) / (num_actors - 1))
+    return np.power(
+        base_epsilon, 1 + alpha * np.arange(num_actors) / max(1, num_actors - 1)
+    )
 
 
 def tweaked_apex_actor_epsilons(
@@ -57,16 +59,20 @@ def main():
             ax.bar(
                 [0, 1, 2],
                 [
-                    apex_epsilons[0],
-                    tweaked_apex_epsilons[0],
                     linear_epsilons[0],
+                    tweaked_apex_epsilons[0],
+                    apex_epsilons[0],
                 ],
-                tick_label=["AX", "AX*", "Lin"],
+                tick_label=[
+                    "Lin",
+                    "AX*",
+                    "AX",
+                ],
             )
         else:
-            ax.plot(apex_epsilons, label="Ape-X")
-            ax.plot(tweaked_apex_epsilons, label="Tweaked Ape-X")
             ax.plot(linear_epsilons, label="Linear")
+            ax.plot(tweaked_apex_epsilons, label="Tweaked Ape-X")
+            ax.plot(apex_epsilons, label="Ape-X", linestyle="--")
 
         ax.set_xlabel("Actor Index")
         ax.set_title(f"N={num_actors}")

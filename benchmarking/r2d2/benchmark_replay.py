@@ -26,9 +26,10 @@ CARTPOLE_CONFIG = {
         "env_id": "CartPole-v1",
         "seq_len": 10,
         "burnin_len": 0,
+        "num_prefetch_batches": 8,
         "batch_size": 64,
-        "replay_buffer_size": 5000,
-        "learning_starts": 100,
+        "replay_size": 5000,
+        "learning_starts": 8 * 64,
     },
     "env_creator_fn_getter": get_gym_env_creator_fn,
     "model_loader": gym_model_loader,
@@ -44,9 +45,10 @@ ATARI_CONFIG = {
         "env_id": "PongNoFrameskip-v4",
         "seq_len": 80,
         "burnin_len": 40,
+        "num_prefetch_batches": 8,
         "batch_size": 64,
-        "replay_buffer_size": 5000,
-        "learning_starts": 100,
+        "replay_size": 2500,
+        "learning_starts": 8 * 64,
     },
     "env_creator_fn_getter": get_atari_env_creator_fn,
     "model_loader": atari_model_loader,
@@ -66,18 +68,20 @@ def run_add_experiment(
     """Runs SPS benchmarking for adding batches of sequences to R2D2 replay buffer."""
     mp_ctxt = mp.get_context("spawn")
     terminate_event = mp_ctxt.Event()
-    actor_replay_queue = mp_ctxt.JoinableQueue(maxsize=100)
-    replay_send_queue = mp_ctxt.JoinableQueue()
-    replay_recv_queue = mp_ctxt.JoinableQueue()
+    actor_to_replay_queue = mp_ctxt.JoinableQueue(maxsize=config.num_actors * 2)
+    learner_to_replay_queue = mp_ctxt.JoinableQueue()
+    replay_to_learner_queue = mp_ctxt.JoinableQueue()
+    log_queue = mp_ctxt.JoinableQueue()
 
     print("main: Spawning replay process.")
     replay_process = mp_ctxt.Process(
         target=run_replay_process,
         args=(
             config,
-            actor_replay_queue,
-            replay_send_queue,
-            replay_recv_queue,
+            actor_to_replay_queue,
+            learner_to_replay_queue,
+            replay_to_learner_queue,
+            log_queue,
             terminate_event,
         ),
     )
@@ -94,16 +98,12 @@ def run_add_experiment(
     )
     reward_seq_buffer = torch.randn((total_seq_len + 1, num_envs), dtype=torch.float32)
     done_buffer = torch.randint(0, 2, (total_seq_len + 1, num_envs), dtype=torch.long)
-    # q_vals_seq_buffer = torch.randn(
-    #     (total_seq_len + 1, num_envs, num_actions), dtype=torch.float32
-    # )
     lstm_h_seq_buffer = torch.randn(
         (1, num_envs, config.lstm_size), dtype=torch.float32
     )
     lstm_c_seq_buffer = torch.randn(
         (1, num_envs, config.lstm_size), dtype=torch.float32
     )
-
     priorities = torch.rand((100, num_envs))
 
     batch, max_q_size = 0, 0
@@ -113,7 +113,7 @@ def run_add_experiment(
         priority = priorities[random.randint(0, 99)]
         while replay_process.is_alive():
             try:
-                actor_replay_queue.put(
+                actor_to_replay_queue.put(
                     (
                         obs_seq_buffer,
                         action_seq_buffer,
@@ -130,7 +130,7 @@ def run_add_experiment(
             except Full:
                 pass
 
-        max_q_size = max(max_q_size, actor_replay_queue.qsize())
+        max_q_size = max(max_q_size, actor_to_replay_queue.qsize())
 
         batch += 1
         if batch % max(1, num_batches // 10) == 0:
@@ -143,37 +143,29 @@ def run_add_experiment(
         raise AssertionError("Replay process terminated early.")
 
     # wait for all replay data to be processed
-    actor_replay_queue.join()
+    actor_to_replay_queue.join()
     add_time_taken = time.time() - add_start_time
 
-    replay_send_queue.put(("get_replay_stats", None))
-    replay_stats = {}
-    while replay_process.is_alive():
-        try:
-            replay_stats = replay_recv_queue.get(timeout=1)
-            replay_recv_queue.task_done()
-            break
-        except Empty:
-            pass
-
-    assert replay_stats["seqs_added"] == batch * num_envs
-    assert batch == num_batches
-    replay_stats["add_time_taken"] = add_time_taken
-    replay_stats["num_batches"] = num_batches
-    replay_stats["main_added_seq_per_sec"] = (num_batches * num_envs) / add_time_taken
-    replay_stats["main_added_batch_per_sec"] = num_batches / add_time_taken
-    replay_stats["max_q_size"] = max_q_size
+    replay_stats = {
+        "add_time_taken": add_time_taken,
+        "num_batches": num_batches,
+        "seqs_added": num_batches * num_envs,
+        "added_seq_per_sec": (num_batches * num_envs) / add_time_taken,
+        "added_batch_per_sec": num_batches / add_time_taken,
+        "max_q_size": max_q_size,
+    }
 
     print("main: shutting down.")
     terminate_event.set()
 
-    for q in [
-        actor_replay_queue,
-        replay_send_queue,
-        replay_recv_queue,
-    ]:
-        q.join()
-        q.close()
+    actor_to_replay_queue.close()
+    learner_to_replay_queue.close()
+    replay_to_learner_queue.close()
+
+    while not log_queue.empty():
+        log_queue.get()
+        log_queue.task_done()
+    log_queue.close()
 
     replay_process.join()
     print("main: All done")
@@ -190,18 +182,20 @@ def run_sample_experiment(
     """Runs SPS benchmarking for adding batches of sequences to R2D2 replay buffer."""
     mp_ctxt = mp.get_context("spawn")
     terminate_event = mp_ctxt.Event()
-    actor_replay_queue = mp_ctxt.JoinableQueue(maxsize=100)
-    replay_send_queue = mp_ctxt.JoinableQueue()
-    replay_recv_queue = mp_ctxt.JoinableQueue()
+    actor_to_replay_queue = mp_ctxt.JoinableQueue(maxsize=config.num_actors * 2)
+    learner_to_replay_queue = mp_ctxt.JoinableQueue()
+    replay_to_learner_queue = mp_ctxt.JoinableQueue()
+    log_queue = mp_ctxt.JoinableQueue()
 
     print("main: Spawning replay process.")
     replay_process = mp_ctxt.Process(
         target=run_replay_process,
         args=(
             config,
-            actor_replay_queue,
-            replay_send_queue,
-            replay_recv_queue,
+            actor_to_replay_queue,
+            learner_to_replay_queue,
+            replay_to_learner_queue,
+            log_queue,
             terminate_event,
         ),
     )
@@ -218,9 +212,6 @@ def run_sample_experiment(
     )
     reward_seq_buffer = torch.randn((total_seq_len + 1, num_envs), dtype=torch.float32)
     done_buffer = torch.randint(0, 2, (total_seq_len + 1, num_envs), dtype=torch.long)
-    # q_vals_seq_buffer = torch.randn(
-    #     (total_seq_len + 1, num_envs, num_actions), dtype=torch.float32
-    # )
     lstm_h_seq_buffer = torch.randn(
         (1, num_envs, config.lstm_size), dtype=torch.float32
     )
@@ -231,12 +222,12 @@ def run_sample_experiment(
 
     print("main: filling replay buffer.")
     step, last_report_step = 0, 0
-    while step < config.replay_buffer_size and replay_process.is_alive():
+    while step < config.replay_size and replay_process.is_alive():
         # Send a batch of replay data to the replay process.
         priority = priorities[random.randint(0, priorities.shape[0] - 1)]
         while replay_process.is_alive():
             try:
-                actor_replay_queue.put(
+                actor_to_replay_queue.put(
                     (
                         obs_seq_buffer,
                         action_seq_buffer,
@@ -254,7 +245,7 @@ def run_sample_experiment(
                 pass
         step += num_envs
         if step - last_report_step > 1000:
-            print(f"main: replay buffer size={step}/{config.replay_buffer_size}")
+            print(f"main: replay buffer size={step}/{config.replay_size}")
             last_report_step = step
 
     if not replay_process.is_alive():
@@ -264,23 +255,21 @@ def run_sample_experiment(
         raise AssertionError("Replay process terminated early.")
 
     print("main: waiting for replay buffer to process all added batches.")
-    while not actor_replay_queue.empty():
-        time.sleep(1)
-    actor_replay_queue.join()
+    actor_to_replay_queue.join()
 
     print("main: running benchmarking sampling.")
     replay_stats = []
     for exp_num, batch_size in enumerate(batch_sizes):
-        print(f"main: running {exp_num=} {batch_size=}.")
+        print(f"\nmain: running {exp_num=} {batch_size=}.")
 
         batch = 0
         start_time = time.time()
         while batch < num_batches and replay_process.is_alive():
-            replay_send_queue.put(("sample", batch_size))
+            learner_to_replay_queue.put(("sample", batch_size))
             while replay_process.is_alive():
                 try:
-                    replay_recv_queue.get(timeout=1)
-                    replay_recv_queue.task_done()
+                    replay_to_learner_queue.get(timeout=1)
+                    replay_to_learner_queue.task_done()
                     break
                 except Empty:
                     pass
@@ -290,36 +279,29 @@ def run_sample_experiment(
 
         time_taken = time.time() - start_time
 
-        replay_send_queue.put(("get_replay_stats", None))
-        batch_replay_stats = {}
-        while replay_process.is_alive():
-            try:
-                batch_replay_stats = replay_recv_queue.get(timeout=1)
-                replay_recv_queue.task_done()
-                break
-            except Empty:
-                pass
-
-        batch_replay_stats["exp_num"] = exp_num
-        batch_replay_stats["batch_size"] = batch_size
-        batch_replay_stats["time_taken"] = time_taken
-        batch_replay_stats["main_seqs_sampled"] = num_batches * batch_size
-        batch_replay_stats["main_sampled_seq_per_sec"] = (
-            num_batches * batch_size
-        ) / time_taken
-        batch_replay_stats["main_sampled_batch_per_sec"] = num_batches / time_taken
+        batch_replay_stats = {
+            "exp_num": exp_num,
+            "batch_size": batch_size,
+            "time_taken": time_taken,
+            "seqs_sampled": num_batches * batch_size,
+            "sampled_seq_per_sec": (num_batches * batch_size) / time_taken,
+            "sampled_batch_per_sec": num_batches / time_taken,
+        }
         replay_stats.append(batch_replay_stats)
 
     print("main: shutting down.")
     terminate_event.set()
 
-    for q in [
-        actor_replay_queue,
-        replay_send_queue,
-        replay_recv_queue,
-    ]:
-        q.join()
-        q.close()
+    actor_to_replay_queue.close()
+    learner_to_replay_queue.join()
+    learner_to_replay_queue.close()
+    replay_to_learner_queue.join()
+    replay_to_learner_queue.close()
+
+    while not log_queue.empty():
+        log_queue.get()
+        log_queue.task_done()
+    log_queue.close()
 
     replay_process.join()
     print("main: All done")
@@ -337,6 +319,12 @@ def run_replay_add_benchmarking(
     print("Running R2D2 replay add benchmarking experiments")
     num_exps = len(num_envs_per_actor)
     print(f"Running a total of {num_exps} experiments")
+
+    learning_starts = config_params["config_kwargs"]["learning_starts"]
+    assert num_batches * min(num_envs_per_actor) >= learning_starts, (
+        "Not enough batches to fill replay buffer. Need at least "
+        f"{learning_starts / min(num_envs_per_actor)} batches."
+    )
 
     header_written = False
     obs_space, num_actions = None, None
@@ -423,12 +411,10 @@ def plot_add(save_file: str):
     sns.set_theme()
 
     y_keys = [
-        "added_seq_per_sec",
-        "main_added_seq_per_sec",
-        "added_batch_per_sec",
-        "main_added_batch_per_sec",
-        "max_q_size",
         "seqs_added",
+        "added_seq_per_sec",
+        "added_batch_per_sec",
+        "max_q_size",
     ]
 
     fig, axs = plt.subplots(
@@ -467,10 +453,9 @@ def plot_sample(save_file: str):
     sns.set_theme()
 
     y_keys = [
+        "seqs_sampled",
         "sampled_seq_per_sec",
-        "main_sampled_seq_per_sec",
-        "main_sampled_batch_per_sec",
-        "main_seqs_sampled",
+        "sampled_batch_per_sec",
     ]
 
     fig, axs = plt.subplots(

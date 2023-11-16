@@ -5,6 +5,7 @@ import gymnasium as gym
 import numpy as np
 import torch
 from gymnasium import spaces
+
 from minidrl.common.atari_wrappers import (
     ClipRewardEnv,
     EpisodicLifeEnv,
@@ -33,14 +34,14 @@ def make_atari_env(env_id: str):
 
 def calculate_replay_size(
     obs_space: spaces.Box,
-    buffer_size: int,
+    replay_size: int,
     seq_len: int,
     burnin_len: int,
     lstm_size: int,
 ):
     """Calculate the size of the replay buffer in bytes."""
     print(f"{obs_space=}")
-    T, C = seq_len + burnin_len + 1, buffer_size
+    T, C = seq_len + burnin_len + 1, replay_size
 
     obs_shape = obs_space.shape
     obs_dtype = torch.from_numpy(obs_space.sample()).dtype
@@ -97,7 +98,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--env_id", type=str, default="CartPole-v1", help="...")
     parser.add_argument("--atari", action="store_true", default=False, help="...")
-    parser.add_argument("--buffer_size", type=int, default=100000, help="...")
+    parser.add_argument("--replay_size", type=int, default=100000, help="...")
     parser.add_argument("--seq_len", type=int, default=80, help="...")
     parser.add_argument("--burnin_len", type=int, default=40, help="...")
     parser.add_argument("--lstm_size", type=int, default=512, help="...")
@@ -109,7 +110,7 @@ if __name__ == "__main__":
         env = make_atari_env(args.env_id) if args.atari else gym.make(args.env_id)
     calculate_replay_size(
         env.observation_space,
-        args.buffer_size,
+        args.replay_size,
         args.seq_len,
         args.burnin_len,
         args.lstm_size,

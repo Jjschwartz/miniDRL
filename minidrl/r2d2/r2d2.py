@@ -17,6 +17,7 @@ import random
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
+from logging import warn
 from multiprocessing.queues import Empty, Full
 from typing import Optional
 
@@ -209,10 +210,21 @@ class R2D2Config:
         )
 
         assert self.seq_len > 0, "Sequence length must be greater than 0."
+        assert self.seq_len == 1 or self.seq_len % 2 == 0, (
+            "Sequence length must be 1 or even (so sequences can cleanly overlap by "
+            "half sequence length)."
+        )
+
+        if self.learning_starts < self.batch_size * self.num_prefetch_batches:
+            self.learning_starts = self.batch_size * self.num_prefetch_batches
+            warn(
+                "`learning_starts` is less than `batch_size * num_prefetch_batches`. "
+                "Setting `learning_starts = batch_size * num_prefetch_batches` = "
+                f"{self.learning_starts}."
+            )
         assert (
-            self.seq_len == 1 or self.seq_len % 2 == 0
-        ), "Sequence length must be 1 or even."
-        assert self.replay_size >= self.learning_starts >= self.batch_size
+            self.replay_size >= self.learning_starts
+        ), "Replay size must be greater than or equal to learning starts value"
 
     @property
     def log_dir(self) -> str:
