@@ -1,4 +1,5 @@
 """Prioritized Replay Buffer for R2D2."""
+import contextlib
 import time
 from multiprocessing.queues import Empty
 from typing import Union
@@ -369,11 +370,9 @@ def run_replay_process(
     print("replay: waiting for buffer to fill")
     start_time, last_log_time = time.time(), time.time()
     while replay_buffer.size < config.learning_starts and not terminate_event.is_set():
-        try:  # noqa: SIM105
+        with contextlib.suppress(Empty):
             replay_buffer.add(*actor_queue.get(timeout=1))
             actor_queue.task_done()
-        except Empty:
-            pass
 
     print(f"replay: buffer full enough (size={replay_buffer.size}), starting training")
     num_sampled_seqs, num_batches_added, num_batches_sampled = 0, 0, 0

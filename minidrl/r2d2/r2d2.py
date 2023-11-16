@@ -10,6 +10,7 @@ Reference implementations:
 https://github.com/michaelnny/deep_rl_zoo/tree/main
 
 """
+import contextlib
 import math
 import os
 import random
@@ -530,15 +531,12 @@ def run_actor(
 
     # get reference to learner model weights
     learner_model_weights = None
-    while not terminate_event.is_set():
-        try:
+    while learner_model_weights is None and not terminate_event.is_set():
+        with contextlib.suppress(Empty):
             result = learner_recv_queue.get(timeout=1)
             assert result[0] == "params"
             learner_model_weights = result[1]
             actor_model.load_state_dict(result[1])
-            break
-        except Empty:
-            pass
 
     # main loop
     while not terminate_event.is_set():
@@ -593,7 +591,7 @@ def run_actor(
             )
 
             while not terminate_event.is_set():
-                try:
+                with contextlib.suppress(Full):
                     replay_queue.put(
                         (
                             obs_seq_buffer.clone(),
@@ -608,8 +606,6 @@ def run_actor(
                         timeout=1,  # timeout after 1 second, to check for terminate
                     )
                     break
-                except Full:
-                    pass
 
             # reset sequence buffers, keeping the last burnin + seq_len / 2 steps
             # from current buffer
@@ -681,7 +677,7 @@ def run_learner(
     config: R2D2Config,
     replay_send_queue: mp.JoinableQueue,
     replay_recv_queue: mp.JoinableQueue,
-    actor_send_queues: list[mp.JoinableQueue],
+    actor_send_queue: mp.JoinableQueue,
     log_queue: mp.JoinableQueue,
     termination_event: mp.Event,
 ):
@@ -697,8 +693,8 @@ def run_learner(
         Queue for sending requests to the replay.
     replay_recv_queue
         Queue for recieving trajectories from the replay.
-    actor_send_queues
-        Queues (one for each actor) for sending model parameters to each actor.
+    actor_send_queue
+        Queue for sending model parameters to actors.
     log_queue
         Queue for sending results to logger process.
     termination_event
@@ -709,60 +705,64 @@ def run_learner(
     # with actor and replay processes.
     torch.set_num_threads(1)
 
-    # model setup
-    device = config.device
+    # Model and optimizer setup
     model = config.load_model()
-    model.share_memory()
-    model.to(device)
+    model.to(config.device)
+
+    # setup shared model, that will be put in shared memory on same device as actors
+    # and used for syncing weights with actors
+    if config.actor_device != config.device:
+        shared_model = config.load_model().to(config.actor_device)
+    else:
+        shared_model = model
+    shared_model.share_memory()
 
     target_model = config.load_model()
-    target_model.to(device)
+    target_model.to(config.device)
     target_model.load_state_dict(model.state_dict())
 
-    # Optimizer setup
     optimizer = optim.Adam(
         model.parameters(), lr=config.learning_rate, eps=config.adam_eps
     )
 
     # Send shared memory model weights reference to actors
-    for queue in actor_send_queues:
-        queue.put(("params", model.state_dict()))
+    for _ in range(config.num_actors):
+        actor_send_queue.put(("params", shared_model.state_dict()))
 
-    # Wait for actors to start and fill replay buffer
     print("learner: Waiting for actors to start and fill replay buffer...")
     replay_send_queue.put(("get_buffer_size", None))
-    while not termination_event.is_set():
-        try:
+    buffer_size = None
+    while buffer_size is None and not termination_event.is_set():
+        with contextlib.suppress(Empty):
             buffer_size = replay_recv_queue.get(timeout=1)
             replay_recv_queue.task_done()
-            assert buffer_size >= config.learning_starts
-            break
-        except Empty:
-            pass
+            # replay full enough, request batch for first iteration
+            replay_send_queue.put(
+                ("sample", config.batch_size * config.num_prefetch_batches)
+            )
 
-    # Training loop
     print("learner: Starting training loop...")
     global_step = 0
     update = 1
     train_start_time = time.time()
     while update < config.num_updates + 1 and not termination_event.is_set():
         update_start_time = time.time()
-        # samples: (T, B, ...), indices: (B,), weights: (B,)
-        replay_send_queue.put(
-            ("sample", config.batch_size * config.num_prefetch_batches)
-        )
         batch = None
-        while not termination_event.is_set():
-            try:
+        while batch is None and not termination_event.is_set():
+            with contextlib.suppress(Empty):
                 batch = replay_recv_queue.get(timeout=1)
-                break
-            except Empty:
-                pass
+
         if termination_event.is_set():
             if batch is not None:
                 del batch
                 replay_recv_queue.task_done()
             break
+
+        if update != config.num_updates:
+            # request batch for next iteration so it can be fetched during update
+            replay_send_queue.put(
+                ("sample", config.batch_size * config.num_prefetch_batches)
+            )
 
         sample_time = time.time() - update_start_time
 
@@ -898,6 +898,8 @@ def run_learner(
         del obs, actions, rewards, dones, lstm_h, lstm_c, indices, weights, batch
         replay_recv_queue.task_done()
 
+        shared_model.load_state_dict(model.state_dict())
+
         ups = update / (time.time() - train_start_time)
         sps = global_step / (time.time() - train_start_time)
         update_time = time.time() - update_start_time
@@ -923,8 +925,8 @@ def run_learner(
 
     print("learner: waiting for shared resources to be released")
     replay_send_queue.join()
-    for q in actor_send_queues:
-        q.join()
+    actor_send_queue.join()
+    log_queue.join()
 
     print("learner: All done.")
 
@@ -933,14 +935,13 @@ def run_r2d2(config: R2D2Config):
     """Run R2D2.
 
     This function spawns the replay, actor, and learner processes, and sets up
-    communication between them. It also handles cleanup after training is finished
-    or in the event an error occurs on any of the processes.
+    communication between them. It also handles logging as well as cleanup after
+    training is finished or in the event an error occurs on any of the processes.
 
     Arguments
     ---------
     config
         Configuration for R2D2.
-
     """
     # seeding
     random.seed(config.seed)
@@ -961,9 +962,9 @@ def run_r2d2(config: R2D2Config):
     terminate_event = mp_ctxt.Event()
 
     # create queues for communication between learner, actors, and replay
-    actor_replay_queue = mp_ctxt.JoinableQueue(maxsize=100)
+    actor_replay_queue = mp_ctxt.JoinableQueue(maxsize=config.num_actors * 2)
     actor_recv_queue = mp_ctxt.JoinableQueue()
-    actor_send_queues = [mp_ctxt.JoinableQueue() for _ in range(config.num_actors)]
+    actor_send_queue = mp_ctxt.JoinableQueue()
     replay_send_queue = mp_ctxt.JoinableQueue()
     replay_recv_queue = mp_ctxt.JoinableQueue()
     log_queue = mp_ctxt.JoinableQueue()
@@ -991,7 +992,7 @@ def run_r2d2(config: R2D2Config):
                 actor_idx,
                 config,
                 actor_replay_queue,
-                actor_send_queues[actor_idx],
+                actor_send_queue,
                 log_queue,
                 terminate_event,
             ),
@@ -1006,7 +1007,7 @@ def run_r2d2(config: R2D2Config):
             config,
             replay_send_queue,
             replay_recv_queue,
-            actor_send_queues,
+            actor_send_queue,
             log_queue,
             terminate_event,
         ),
@@ -1046,7 +1047,7 @@ def run_r2d2(config: R2D2Config):
         and replay_process.is_alive()
         and all(a.is_alive() for a in actors)
     ):
-        try:
+        with contextlib.suppress(Empty):
             result = log_queue.get(timeout=1)
             training_time = timedelta(seconds=int(time.time() - start_time))
             progress = (global_step / config.total_timesteps) * 100
@@ -1058,12 +1059,12 @@ def run_r2d2(config: R2D2Config):
 
                 result_output = [f"\nmain [{progress_str}]: actor results"]
                 for key, value in result[1].items():
-                    # log to stdout
                     if isinstance(value, float):
                         result_output.append(f"{key}={value:0.4f}")
                     else:
                         result_output.append(f"{key}={value}")
                 print("\n  ".join(result_output), "\n")
+
                 log_queue.task_done()
             elif result[0] == "replay":
                 for key, value in result[1].items():
@@ -1071,12 +1072,12 @@ def run_r2d2(config: R2D2Config):
 
                 result_output = [f"\nmain [{progress_str}]: replay stats"]
                 for key, value in result[1].items():
-                    # log to stdout
                     if isinstance(value, float):
                         result_output.append(f"{key}={value:0.4f}")
                     else:
                         result_output.append(f"{key}={value}")
                 print("\n  ".join(result_output), "\n")
+
                 log_queue.task_done()
             elif result[0] == "learner":
                 global_step = result[1].get("global_step", global_step)
@@ -1087,12 +1088,11 @@ def run_r2d2(config: R2D2Config):
                 if "learner_UPS" in result[1] and time.time() - last_report_time > 5:
                     print(f"main [{progress_str}]: UPS={result[1]['learner_UPS']:.1f}")
                     last_report_time = time.time()
+
                 log_queue.task_done()
             else:
                 log_queue.task_done()
                 raise ValueError(f"Unknown result {result}")
-        except Empty:
-            pass
 
         if config.capture_video and config.track_wandb:
             video_filenames = [
@@ -1138,9 +1138,10 @@ def run_r2d2(config: R2D2Config):
         actor_replay_queue,
         replay_send_queue,
         replay_recv_queue,
+        actor_send_queue,
         actor_recv_queue,
         log_queue,
-    ] + actor_send_queues:
+    ]:
         while not q.empty():
             q.get()
             q.task_done()
