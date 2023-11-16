@@ -164,7 +164,7 @@ class R2D2GymConfig(R2D2Config):
     # Length of burn-in sequence for each training sequence
     burnin_len: int = 0
     # Size of replay buffer (i.e. number of sequences)
-    replay_buffer_size: int = 100000
+    replay_size: int = 100000
     # Size of replay buffer before learning starts
     learning_starts: int = 500
     # Target network update interval (in terms of number of updates)

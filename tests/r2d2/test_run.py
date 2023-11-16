@@ -20,9 +20,10 @@ def test_run_r2d2_single_actor():
         # replay
         seq_len=16,
         burnin_len=8,
-        replay_buffer_size=1000,
+        replay_size=1000,
         # training hyperparameters
         gamma=0.99,
+        num_prefetch_batches=1,
         batch_size=128,
         learning_starts=128,
         n_steps=1,
@@ -60,9 +61,10 @@ def test_run_r2d2_multi_actor():
         # replay
         seq_len=16,
         burnin_len=8,
-        replay_buffer_size=1000,
+        replay_size=1000,
         # training hyperparameters
         gamma=0.99,
+        num_prefetch_batches=1,
         batch_size=128,
         learning_starts=128,
         n_steps=1,

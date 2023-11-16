@@ -3,9 +3,9 @@ import gymnasium as gym
 import numpy as np
 import torch
 import torch.multiprocessing as mp
-
 from minidrl.r2d2.r2d2 import R2D2Config
 from minidrl.r2d2.replay import R2D2PrioritizedReplay, SumTree, run_replay_process
+
 
 # The size of the LSTM in the default gym R2D2 network
 LSTM_SIZE = 128
@@ -78,7 +78,7 @@ def test_sum_tree():
 
 
 def _check_replay_init(replay, config, obs_shape):
-    C = config.replay_buffer_size
+    C = config.replay_size
     T = config.seq_len + config.burnin_len + 1
     assert replay.capacity == C
     assert replay.total_seq_len == T
@@ -117,7 +117,7 @@ def test_r2d2_prioritized_replay_single_sample():
         num_envs_per_actor=1,
         seq_len=4,
         burnin_len=2,
-        replay_buffer_size=8,
+        replay_size=8,
         replay_priority_exponent=0.9,
         replay_priority_noise=1e-3,
         importance_sampling_exponent=0.6,
@@ -198,7 +198,7 @@ def test_r2d2_prioritized_replay_batch_sample():
         num_envs_per_actor=4,
         seq_len=4,
         burnin_len=2,
-        replay_buffer_size=8,
+        replay_size=8,
         replay_priority_exponent=0.9,
         replay_priority_noise=1e-3,
         importance_sampling_exponent=0.6,
@@ -279,7 +279,7 @@ def test_r2d2_distributed_replay():
         num_envs_per_actor=4,
         seq_len=4,
         burnin_len=2,
-        replay_buffer_size=8,
+        replay_size=8,
         replay_priority_exponent=0.9,
         replay_priority_noise=1e-3,
         importance_sampling_exponent=0.6,
@@ -294,16 +294,19 @@ def test_r2d2_distributed_replay():
 
     mp_ctxt = mp.get_context("spawn")
     terminate_event = mp_ctxt.Event()
-    actor_replay_queue = mp_ctxt.JoinableQueue()
-    learner_recv_queue = mp_ctxt.JoinableQueue()
-    learner_send_queue = mp_ctxt.JoinableQueue()
+    actor_to_replay_queue = mp_ctxt.JoinableQueue(maxsize=config.num_actors * 2)
+    learner_to_replay_queue = mp_ctxt.JoinableQueue()
+    replay_to_learner_queue = mp_ctxt.JoinableQueue()
+    log_queue = mp_ctxt.JoinableQueue()
+
     replay_process = mp_ctxt.Process(
         target=run_replay_process,
         args=(
             config,
-            actor_replay_queue,
-            learner_send_queue,
-            learner_recv_queue,
+            actor_to_replay_queue,
+            learner_to_replay_queue,
+            replay_to_learner_queue,
+            log_queue,
             terminate_event,
         ),
     )
@@ -318,7 +321,7 @@ def test_r2d2_distributed_replay():
             rng, env, T, B, config.lstm_size
         )
         priority = np.ones((B,))
-        actor_replay_queue.put(
+        actor_to_replay_queue.put(
             (
                 obs,
                 actions,
@@ -331,9 +334,9 @@ def test_r2d2_distributed_replay():
         )
 
     # Get batch of transitions
-    learner_send_queue.put(("sample", B))
-    samples, indices, weights = learner_recv_queue.get()
-    learner_recv_queue.task_done()
+    learner_to_replay_queue.put(("sample", B))
+    samples, indices, weights = replay_to_learner_queue.get()
+    replay_to_learner_queue.task_done()
 
     assert samples[0].shape == (T, B, *obs_space.shape)
     assert samples[1].shape == (T, B)
@@ -345,7 +348,7 @@ def test_r2d2_distributed_replay():
     assert weights.shape == (B,)
 
     updated_priorities = np.random.rand(B).tolist()
-    learner_send_queue.put(("update_priorities", indices, updated_priorities))
+    learner_to_replay_queue.put(("update_priorities", indices, updated_priorities))
 
     # delete any shared memory references, so shutdown happens correctly
     del samples, indices, weights
@@ -353,13 +356,18 @@ def test_r2d2_distributed_replay():
     # Close replay process
     terminate_event.set()
 
-    learner_send_queue.join()
-    actor_replay_queue.join()
+    learner_to_replay_queue.join()
+    actor_to_replay_queue.join()
+
+    while not log_queue.empty():
+        log_queue.get()
+        log_queue.task_done()
+    log_queue.close()
 
     replay_process.join()
-    actor_replay_queue.close()
-    learner_send_queue.close()
-    learner_recv_queue.close()
+    actor_to_replay_queue.close()
+    learner_to_replay_queue.close()
+    replay_to_learner_queue.close()
 
 
 if __name__ == "__main__":

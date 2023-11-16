@@ -148,7 +148,7 @@ class R2D2Config:
     # Length of burn-in sequence for each training sequence
     burnin_len: int = 40
     # Size of replay buffer in terms of number of sequences
-    replay_buffer_size: int = 100000
+    replay_size: int = 100000
     # Exponent for replay priority
     replay_priority_exponent: float = 0.9
     # Prioritized replay noise
@@ -212,7 +212,7 @@ class R2D2Config:
         assert (
             self.seq_len == 1 or self.seq_len % 2 == 0
         ), "Sequence length must be 1 or even."
-        assert self.replay_buffer_size >= self.learning_starts >= self.batch_size
+        assert self.replay_size >= self.learning_starts >= self.batch_size
 
     @property
     def log_dir(self) -> str:
@@ -271,8 +271,8 @@ class R2D2Config:
 
         """
         if self.num_actors < 4:
-            # If using less than 4 actors, the default function leads to quite high and low
-            # epsilons for the low number of actors.
+            # If using less than 4 actors, the default function leads to quite high and
+            # low epsilons for the low number of actors.
             # So we pretend we have 16 actors, and select the epsilons for the actors
             # from intervals in the middle of the 16 actor epsilons.
             epsilons = np.power(
@@ -287,8 +287,8 @@ class R2D2Config:
         """Whether the actor with index `actor_idx` should report results.
 
         The actor with exploration epsilon closest to 0.05 will report results. This is
-        so that the results are not biased by the exploration epsilon. When comparing
-        results across different runs with varying number of actors.
+        done to try reduce any bias in the results due to exploration epsilon when
+        comparing results across different runs with varying number of actors.
         """
         epsilons = [self.get_actor_epsilon(i) for i in range(self.num_actors)]
         closest_idx = np.argmin(np.abs(np.array(epsilons) - 0.05))
@@ -429,8 +429,8 @@ def run_actor(
 ):
     """Run an R2D2 actor process.
 
-    Each R2D2 process collects trajectories and sends them to replay while periodically
-    requesting the latest model parameters from the learner.
+    Each R2D2 actor process collects trajectories and sends them to replay while
+    periodically updating their model with the latest model parameters from the learner.
 
     Arguments
     ---------
@@ -458,7 +458,6 @@ def run_actor(
     np_rng = np.random.RandomState(actor_idx)
 
     epsilon = config.get_actor_epsilon(actor_idx)
-    is_reporting_actor = config.is_reporting_actor(actor_idx)
     device = config.actor_device
 
     print(f"actor={actor_idx}: {device=} {epsilon=:.4f}.")
@@ -480,7 +479,6 @@ def run_actor(
     # model setup
     actor_model = config.load_model()
     actor_model.to(device)
-    # disable autograd for actor model
     for param in actor_model.parameters():
         param.requires_grad = False
 
@@ -488,8 +486,6 @@ def run_actor(
     total_seq_len = config.seq_len + config.burnin_len
     # timesteps to drop from the start of the sequence after sequence added to replay
     seq_drop_len = max(1, config.seq_len // 2)
-    # sequence buffers: o_t, a_tm1, r_tm1, d_tm1, q_t, h_0
-    # stores burnin_len + seq_len + 1 timesteps
     obs_seq_buffer = torch.zeros(
         (total_seq_len + 1, num_envs, *obs_space.shape), dtype=torch.float32
     )
@@ -522,14 +518,7 @@ def run_actor(
         torch.zeros((1, num_envs, config.lstm_size), dtype=torch.float32).to(device),
     )
 
-    step = 0
-    current_seq_len, num_episodes_completed = 0, 0
-    # buffer for storing last 100 episodes returns
-    episode_returns = np.zeros(100, dtype=np.float32)
-    episode_lengths = np.zeros(100, dtype=np.int64)
-    start_time = time.time()
-
-    # get reference to learner model weights
+    # get reference to learner model weights in shared memory for periodic syncing
     learner_model_weights = None
     while learner_model_weights is None and not terminate_event.is_set():
         with contextlib.suppress(Empty):
@@ -538,12 +527,21 @@ def run_actor(
             learner_model_weights = result[1]
             actor_model.load_state_dict(result[1])
 
+    if config.is_reporting_actor(actor_idx):
+        # buffer for storing last 100 episodes returns for logging
+        episode_returns = np.zeros(100, dtype=np.float32)
+        episode_lengths = np.zeros(100, dtype=np.int64)
+    else:
+        episode_returns, episode_lengths = None, None
+
     # main loop
+    step = 0
+    current_seq_len, num_episodes_completed = 0, 0
+    start_time = time.time()
     while not terminate_event.is_set():
         if step % config.actor_update_interval == 0:
             actor_model.load_state_dict(learner_model_weights)
 
-        # q_t = Q(o_t, a_tm1, r_tm1, d_tm1)
         q_vals, lstm_state = actor_model.forward(
             obs, prev_action, prev_reward, prev_done, lstm_state
         )
@@ -557,10 +555,8 @@ def run_actor(
         else:
             action = torch.argmax(q_vals, dim=-1)
 
-        # o_tp1, r_t, d_t, i_t = env.step(a_t)
         next_obs, reward, terminated, truncated, info = envs.step(action.cpu().numpy())
 
-        # add to sequence buffers: o_t, a_tm1, r_tm1, d_tm1, q_t
         obs_seq_buffer[current_seq_len] = obs
         action_seq_buffer[current_seq_len] = prev_action
         reward_seq_buffer[current_seq_len] = prev_reward
@@ -579,7 +575,7 @@ def run_actor(
         if current_seq_len == total_seq_len + 1:
             # sequence is full, add to replay buffer
 
-            # calculate priority, skipping the burnin steps
+            # calculate priority (skipping the burnin steps)
             # and using the same q values as target q values
             _, priority = compute_loss_and_priority(
                 config=config,
@@ -628,10 +624,8 @@ def run_actor(
 
         step += 1
 
-        if is_reporting_actor:
-            # accumulate and send results to learner
-            # only send from first actor since it will have the same exploration epsilon
-            # irrespective of the number of actors
+        if episode_returns is not None and episode_lengths is not None:
+            # is reporting actor so accumulate and send results to learner
             for item in [
                 i
                 for i in info.get("final_info", [])
@@ -642,7 +636,6 @@ def run_actor(
                 num_episodes_completed += 1
 
             if step > 0 and step % 1000 == 0:
-                # print(f"actor={actor_idx} - t={step}: Sending results to learner.")
                 sps = int(step * config.num_envs_per_actor) / (time.time() - start_time)
                 ep_returns = episode_returns[:num_episodes_completed]
                 ep_lengths = episode_lengths[:num_episodes_completed]
@@ -709,7 +702,7 @@ def run_learner(
     model = config.load_model()
     model.to(config.device)
 
-    # setup shared model, that will be put in shared memory on same device as actors
+    # shared model that will be put in shared memory on same device as actors
     # and used for syncing weights with actors
     if config.actor_device != config.device:
         shared_model = config.load_model().to(config.actor_device)
@@ -742,11 +735,11 @@ def run_learner(
             )
 
     print("learner: Starting training loop...")
-    global_step = 0
-    update = 1
+    update, global_step = 1, 0
     train_start_time = time.time()
     while update < config.num_updates + 1 and not termination_event.is_set():
         update_start_time = time.time()
+
         batch = None
         while batch is None and not termination_event.is_set():
             with contextlib.suppress(Empty):
@@ -786,7 +779,6 @@ def run_learner(
             b_target_lstm_h, b_target_lstm_c = b_lstm_h.clone(), b_lstm_c.clone()
 
             burnin_time_start = time.time()
-            # burn in lstm state
             if config.burnin_len > 0:
                 with torch.no_grad():
                     _, (b_lstm_h, b_lstm_c) = model.forward(
@@ -889,7 +881,8 @@ def run_learner(
                     os.path.join(config.log_dir, f"checkpoint_{update}.pt"),
                 )
 
-            if batch_idx == 4:
+            if batch_idx == config.num_prefetch_batches - 1:
+                # last batch from sample so release any shared memory references
                 del b_obs, b_actions, b_rewards, b_dones, b_lstm_h, b_lstm_c
 
         replay_send_queue.put(("update_priorities", indices, updated_priorities))
@@ -898,8 +891,10 @@ def run_learner(
         del obs, actions, rewards, dones, lstm_h, lstm_c, indices, weights, batch
         replay_recv_queue.task_done()
 
+        # update shared model weights with latest model weights
         shared_model.load_state_dict(model.state_dict())
 
+        # log metrics
         ups = update / (time.time() - train_start_time)
         sps = global_step / (time.time() - train_start_time)
         update_time = time.time() - update_start_time
@@ -962,11 +957,10 @@ def run_r2d2(config: R2D2Config):
     terminate_event = mp_ctxt.Event()
 
     # create queues for communication between learner, actors, and replay
-    actor_replay_queue = mp_ctxt.JoinableQueue(maxsize=config.num_actors * 2)
-    actor_recv_queue = mp_ctxt.JoinableQueue()
-    actor_send_queue = mp_ctxt.JoinableQueue()
-    replay_send_queue = mp_ctxt.JoinableQueue()
-    replay_recv_queue = mp_ctxt.JoinableQueue()
+    actor_to_replay_queue = mp_ctxt.JoinableQueue(maxsize=config.num_actors * 2)
+    learner_to_actor_queue = mp_ctxt.JoinableQueue()
+    learner_to_replay_queue = mp_ctxt.JoinableQueue()
+    replay_to_learner_queue = mp_ctxt.JoinableQueue()
     log_queue = mp_ctxt.JoinableQueue()
 
     print("main: Spawning replay process.")
@@ -974,9 +968,9 @@ def run_r2d2(config: R2D2Config):
         target=run_replay_process,
         args=(
             config,
-            actor_replay_queue,
-            replay_send_queue,
-            replay_recv_queue,
+            actor_to_replay_queue,
+            learner_to_replay_queue,
+            replay_to_learner_queue,
             log_queue,
             terminate_event,
         ),
@@ -991,8 +985,8 @@ def run_r2d2(config: R2D2Config):
             args=(
                 actor_idx,
                 config,
-                actor_replay_queue,
-                actor_send_queue,
+                actor_to_replay_queue,
+                learner_to_actor_queue,
                 log_queue,
                 terminate_event,
             ),
@@ -1005,9 +999,9 @@ def run_r2d2(config: R2D2Config):
         target=run_learner,
         args=(
             config,
-            replay_send_queue,
-            replay_recv_queue,
-            actor_send_queue,
+            learner_to_replay_queue,
+            replay_to_learner_queue,
+            learner_to_actor_queue,
             log_queue,
             terminate_event,
         ),
@@ -1052,6 +1046,7 @@ def run_r2d2(config: R2D2Config):
             training_time = timedelta(seconds=int(time.time() - start_time))
             progress = (global_step / config.total_timesteps) * 100
             progress_str = f"{training_time} {global_step=} {update=} {progress=:.2f}%"
+
             if result[0] == "actor":
                 # log actor results
                 for key, value in result[1].items():
@@ -1135,11 +1130,10 @@ def run_r2d2(config: R2D2Config):
 
     print("main: Draining and closing replay and actor queues.")
     for q in [
-        actor_replay_queue,
-        replay_send_queue,
-        replay_recv_queue,
-        actor_send_queue,
-        actor_recv_queue,
+        actor_to_replay_queue,
+        learner_to_replay_queue,
+        replay_to_learner_queue,
+        learner_to_actor_queue,
         log_queue,
     ]:
         while not q.empty():

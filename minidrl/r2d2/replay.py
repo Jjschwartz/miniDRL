@@ -11,7 +11,7 @@ from gymnasium import spaces
 
 
 class SumTree:
-    """A binary tree where non-leaf nodes ar the sum of their children.
+    """A binary tree where non-leaf nodes are the sum of their children.
 
     Leaf nodes contain non-negative floats and are set externally. Non-leaf nodes
     are the sum of their children. This data structure allows O(log n) updates and
@@ -121,14 +121,13 @@ class R2D2PrioritizedReplay:
     Since R2D2 needs a_t, r_t, and done_t, for computing loss and priorities for time
     `t`, we store sequences of length T+1, where T is the burn-in + sequence length.
 
-    Actors send transitions to the replay buffer via a shared queue.
     """
 
     def __init__(self, obs_space: spaces.Box, config):
         """Initialize."""
         self.config = config
         # capacity = number of sequences
-        self.capacity = config.replay_buffer_size
+        self.capacity = config.replay_size
         self.total_seq_len = config.seq_len + config.burnin_len + 1
         self.num_added = 0
 
