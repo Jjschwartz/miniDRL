@@ -48,7 +48,7 @@ This repository contains standalone implementations of some of the main distribu
 
 ### PPO - Single Machine
 
-[Paper](https://arxiv.org/abs/1707.06347) | [code](https://github.com/Jjschwartz/miniDRL/blob/main/minidrl/ppo/ppo.py) | [docs](https://github.com/Jjschwartz/miniDRL/blob/main/docs/ppo/ppo.md)
+[paper](https://arxiv.org/abs/1707.06347) | [code](https://github.com/Jjschwartz/miniDRL/blob/main/minidrl/ppo/ppo.py) | [docs](https://github.com/Jjschwartz/miniDRL/blob/main/docs/ppo/ppo.md)
 
 |![Learning Curve by wall time vs num workers](docs/ppo/figures/pong_vs_num_workers_wall_time.svg)|
 |:--:|
@@ -57,7 +57,7 @@ This repository contains standalone implementations of some of the main distribu
 
 ### R2D2
 
-[Paper](https://openreview.net/forum?id=r1lyTjAqYX) | [code](https://github.com/Jjschwartz/miniDRL/tree/main/minidrl/r2d2) | [docs](https://github.com/Jjschwartz/miniDRL/blob/main/docs/r2d2/r2d2.md)
+[paper](https://openreview.net/forum?id=r1lyTjAqYX) | [code](https://github.com/Jjschwartz/miniDRL/tree/main/minidrl/r2d2) | [docs](https://github.com/Jjschwartz/miniDRL/blob/main/docs/r2d2/r2d2.md)
 
 
 ### Maybe in the future
