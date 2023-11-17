@@ -6,7 +6,7 @@ Minimal implementations of distributed deep reinforcement learning algorithms, w
     
 Prerequisites:
 
-- python >= 3.9  (tested with 3.10)
+- python >= 3.10  (tested with 3.10)
 
 To install:
 
@@ -54,17 +54,14 @@ This repository contains standalone implementations of some of the main distribu
 |:--:|
 |*Learning curve of PPO - Single Machine on Atari Pong with different number of parallel workers*|
 
-### PPO - Multi Machine
-
-**Coming Soon**
 
 ### R2D2
 
 [Paper](https://openreview.net/forum?id=r1lyTjAqYX) | [code](https://github.com/Jjschwartz/miniDRL/tree/main/minidrl/r2d2) | [docs](https://github.com/Jjschwartz/miniDRL/blob/main/docs/r2d2/r2d2.md)
 
-<!---
-# uncomment and update figure link when R2D2 is implemented
-|![Learning Curve by wall time vs num actor](docs/ppo/figures/pong_vs_num_workers_wall_time.svg)|
-|:--:|
-|*Learning curve of R2D2 - Single Machine on Atari Pong with different number of parallel actors*|
--->
+
+### Maybe in the future
+
+- PPO - Multi Machine
+- IMPALA
+- R2D2 - Multi Machine

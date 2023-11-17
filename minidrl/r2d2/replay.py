@@ -420,7 +420,6 @@ def run_replay_process(
                     {
                         "size": replay_buffer.size,
                         "seqs_added": replay_buffer.num_added,
-                        "steps_added": replay_buffer.num_added * config.seq_len,
                         "seqs_sampled": num_sampled_seqs,
                         "replay_ratio": num_sampled_seqs / replay_buffer.num_added,
                         "added_seq_per_sec": replay_buffer.num_added / time_running,

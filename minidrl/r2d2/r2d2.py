@@ -916,7 +916,6 @@ def run_learner(
             "learner_SPS": sps,
             "learner_UPS": ups,
             "sample_time": sample_time,
-            "update_time": update_time,
             "sample_time_per_batch": sample_time / config.num_prefetch_batches,
             "update_time_per_batch": update_time / config.num_prefetch_batches,
         }
